@@ -1,0 +1,11 @@
+**/*
+!.nixpacks.toml
+!.nixpacksignore
+!.dockerignore
+!railway.toml
+!apps/backend/**
+
+node_modules
+.git
+.vscode
+.idea

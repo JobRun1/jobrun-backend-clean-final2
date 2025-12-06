@@ -1,6 +1,0 @@
-[build]
-builder = "NIXPACKS"
-nixpacksConfigPath = ".nixpacks.toml"
-
-[deploy]
-startCommand = "cd apps/backend && node dist/index.js"
