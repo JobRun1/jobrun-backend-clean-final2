@@ -1,5 +1,6 @@
 [build]
 builder = "NIXPACKS"
+workspace = "apps/backend"
 
 [deploy]
-startCommand = "cd apps/backend && node dist/index.js"
+startCommand = "node dist/index.js"
