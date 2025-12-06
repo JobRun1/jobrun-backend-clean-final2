@@ -1,5 +1,5 @@
 [build]
-builder = "BUILDPACKS"
+builder = "buildpacks"
 
 [deploy]
 startCommand = "cd apps/backend && node dist/index.js"
