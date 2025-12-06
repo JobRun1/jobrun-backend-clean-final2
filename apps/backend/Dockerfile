@@ -1,22 +1,15 @@
 FROM node:18-bullseye
 
-# Set working directory
 WORKDIR /app
 
-# Copy backend files only
-COPY package*.json ./
-COPY prisma ./prisma
-COPY src ./src
-COPY tsconfig.json .
+# Copy ONLY backend files
+COPY apps/backend/package*.json ./
+COPY apps/backend/tsconfig.json ./
+COPY apps/backend/prisma ./prisma
+COPY apps/backend/src ./src
 
-# Install dependencies
-RUN npm install --legacy-peer-deps
+RUN npm install --legacy-peer-deps --no-audit
 
-# Generate Prisma client
-RUN npx prisma generate
-
-# Build TypeScript
 RUN npm run build
 
-# Start app
-CMD ["node", "dist/index.js"]
+CMD ["npm", "run", "start"]
