@@ -1,14 +1,17 @@
+[paths]
+workspace = "apps/backend"
+
 [phases.setup]
 nixPkgs = ["nodejs_20"]
 
 [phases.install]
-cmds = ["cd apps/backend && npm ci --legacy-peer-deps --no-audit"]
+cmds = ["npm ci --legacy-peer-deps --no-audit"]
 
 [phases.build]
 cmds = [
-  "cd apps/backend && npx prisma generate",
-  "cd apps/backend && npx tsc"
+  "npx prisma generate",
+  "npx tsc"
 ]
 
 [start]
-cmd = "cd apps/backend && node dist/index.js"
+cmd = "node dist/index.js"
