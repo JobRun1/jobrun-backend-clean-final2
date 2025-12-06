@@ -1,27 +1,28 @@
 import { Router } from "express";
-import { Twilio } from "twilio";
+import twilio from "twilio";
 
 const router = Router();
 
-// Load env
 const accountSid = process.env.TWILIO_ACCOUNT_SID!;
 const authToken = process.env.TWILIO_AUTH_TOKEN!;
 const twilioNumber = process.env.TWILIO_NUMBER!;
-const client = new Twilio(accountSid, authToken);
 
-// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-// 1) VOICE WEBHOOK — When someone CALLS your Twilio number
-// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+const client = twilio(accountSid, authToken);
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// 1. INCOMING VOICE CALL → Return TwiML only
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 router.post("/voice", async (req, res) => {
-  console.log("📞 Incoming voice call from:", req.body.From);
+  const from = req.body.From;
+  console.log("📞 Incoming voice call from:", from);
 
-  // Simple TwiML welcome message
+  // Voice TwiML
   const twiml = `
     <Response>
       <Say voice="Polly.Joanna">
-        Hello! This is the JobRun automated assistant.
-        Your call has been received successfully.
+        Hello! This is the JobRun automated assistant. 
+        Thanks for calling — once your call ends, you'll receive a confirmation text.
       </Say>
       <Hangup/>
     </Response>
@@ -31,36 +32,75 @@ router.post("/voice", async (req, res) => {
   res.send(twiml);
 });
 
-// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-// 2) STATUS CALLBACK — Twilio call/SMS lifecycle events
-// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// 2. CALL STATUS CALLBACK → POST-CALL SMS
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-router.post("/status", (req, res) => {
-  console.log("📡 Twilio Status Callback Received:");
-  console.log(req.body);
+router.post("/status", async (req, res) => {
+  const callStatus = req.body.CallStatus;
+  const from = req.body.From;
 
-  // Must respond with 200 to tell Twilio all is well
+  console.log(`📡 Status update: ${callStatus} from ${from}`);
+
+  // When call is finished
+  if (callStatus === "completed") {
+    try {
+      await client.messages.create({
+        to: from,
+        from: twilioNumber,
+        body:
+          "Thanks for calling JobRun! Your call has now ended. " +
+          "If you're onboarding your business, just reply here and our assistant will guide you through setup."
+      });
+
+      console.log("📩 Post-call SMS sent to:", from);
+    } catch (err) {
+      console.error("❌ Error sending post-call SMS:", err);
+    }
+  }
+
+  // Handle missed / failed calls
+  if (["no-answer", "busy", "failed"].includes(callStatus)) {
+    try {
+      await client.messages.create({
+        to: from,
+        from: twilioNumber,
+        body:
+          "Sorry we missed your call! If you're getting started with JobRun, just reply to this message and our assistant will help you."
+      });
+
+      console.log("📩 Missed-call SMS sent to:", from);
+    } catch (err) {
+      console.error("❌ Error sending missed-call SMS:", err);
+    }
+  }
+
   res.sendStatus(200);
 });
 
-// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-// 3) OPTIONAL: Inbound SMS webhook
-// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// 3. INBOUND SMS HANDLER
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 router.post("/sms", async (req, res) => {
   const from = req.body.From;
-  const body = req.body.Body;
+  const body = req.body.Body?.trim() || "";
 
-  console.log(`💬 Incoming SMS from ${from}: ${body}`);
+  console.log("💬 Incoming SMS:", { from, body });
 
-  const reply = `
+  // Simple auto-reply for now
+  const reply =
+    "Thanks for contacting JobRun! This number is monitored by our automated assistant. " +
+    "How can we help you get set up today?";
+
+  const twiml = `
     <Response>
-      <Message>Thanks! JobRun backend received your message.</Message>
+      <Message>${reply}</Message>
     </Response>
   `;
 
   res.type("text/xml");
-  res.send(reply);
+  res.send(twiml);
 });
 
 export default router;
