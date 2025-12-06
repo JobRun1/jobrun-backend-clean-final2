@@ -1,0 +1,311 @@
+import { Request, Response } from 'express';
+import { TwilioSMSPayload } from '../utils/twilioTypes';
+import { logger } from '../../utils/logger';
+import { prisma } from '../../db';
+import { findOrCreateCustomer } from '../../modules/customer/service';
+import { findOrCreateConversation, addMessage } from '../../modules/conversation/service';
+import { sendSMS } from '../client';
+import { MessageDirection, MessageType } from '@prisma/client';
+import { twilioToIntent } from '../../../../../integration/adapters/twilioToIntent.adapter';
+import { inboundPipeline } from '../../../../../integration/pipelines/inbound.pipeline';
+import { automationToBackend } from '../../../../../integration/adapters/automationToBackend.adapter';
+import { lyraToSms } from '../../../../../integration/bridges/lyraToSms.bridge';
+import { memoryPull } from '../../../../../integration/memory/memory.pull';
+import { memoryMerge } from '../../../../../integration/memory/memory.merge';
+import { memoryPush } from '../../../../../integration/memory/memory.push';
+import { IntentSchema } from '../../../../../integration/validators/intent.validator';
+import { AutomationSchema } from '../../../../../integration/validators/automation.validator';
+import { sentinelGuard } from '../../../../../integration/sentinel/sentinel.guard';
+
+/**
+ * Handle inbound SMS from Twilio - AI Handoff Gateway
+ * Unified architecture with voiceInbound handler
+ * FULLY INSTRUMENTED FOR PIPELINE DEBUGGING
+ */
+export async function handleInboundSMS(req: Request, res: Response): Promise<void> {
+  try {
+    const payload: TwilioSMSPayload = req.body;
+
+    logger.info('📥 [SMS INBOUND] Received inbound SMS', {
+      from: payload.From,
+      to: payload.To,
+      messageSid: payload.MessageSid,
+      body: payload.Body,
+    });
+
+    // Find which client this number belongs to
+    const client = await prisma.client.findFirst({
+      where: { phoneNumber: payload.To },
+    });
+
+    if (!client) {
+      logger.warn('⚠️  [SMS INBOUND] No client found for phone number', { phoneNumber: payload.To });
+      res.status(200).send('OK');
+      return;
+    }
+
+    logger.info('✅ [SMS INBOUND] Client found', {
+      clientId: client.id,
+      businessName: client.businessName,
+    });
+
+    // 1. Find or create customer
+    const customer = await findOrCreateCustomer(client.id, payload.From);
+    logger.info('✅ [SMS INBOUND] Customer resolved', {
+      customerId: customer.id,
+      phone: customer.phone,
+    });
+
+    // 2. Find or create conversation thread
+    const conversation = await findOrCreateConversation(client.id, customer.id);
+    logger.info('✅ [SMS INBOUND] Conversation resolved', {
+      conversationId: conversation.id,
+    });
+
+    // 3. Save inbound message
+    await addMessage({
+      conversationId: conversation.id,
+      clientId: client.id,
+      customerId: customer.id,
+      direction: MessageDirection.INBOUND,
+      type: MessageType.SMS,
+      body: payload.Body,
+      twilioSid: payload.MessageSid,
+    });
+    logger.info('✅ [SMS INBOUND] Inbound message saved to DB');
+
+    // 4. Convert to IntentObject (DIAL ADAPTER)
+    logger.info('🔄 [DIAL ADAPTER] Converting Twilio payload to IntentObject...');
+    const intent = await twilioToIntent(payload);
+    const validatedIntent = IntentSchema.parse(intent);
+    logger.info('✅ [DIAL ADAPTER] IntentObject created and validated', {
+      intentObject: JSON.stringify(validatedIntent, null, 2),
+    });
+
+    // 5. Sentinel guard - inbound
+    logger.info('🛡️  [SENTINEL] Running inbound guard on IntentObject...');
+    const inboundGuard = await sentinelGuard({
+      content: validatedIntent.raw_message,
+      metadata: validatedIntent.metadata,
+    });
+
+    if (!inboundGuard.allowed) {
+      logger.warn('❌ [SENTINEL] Inbound SMS blocked by Sentinel', {
+        reason: inboundGuard.reason,
+        anomalies: inboundGuard.anomalies,
+      });
+
+      const fallbackMessage = "We'll get back to you shortly.";
+      const fallbackSid = await sendSMS(payload.From, payload.To, fallbackMessage);
+
+      await addMessage({
+        conversationId: conversation.id,
+        clientId: client.id,
+        customerId: customer.id,
+        direction: MessageDirection.OUTBOUND,
+        type: MessageType.SMS,
+        body: fallbackMessage,
+        twilioSid: fallbackSid,
+      });
+
+      res.status(200).send('OK');
+      return;
+    }
+    logger.info('✅ [SENTINEL] Inbound guard passed');
+
+    // 6. Pull memory from DB (VAULT)
+    logger.info('🗄️  [VAULT] Pulling memory for customer...');
+    const memory = await memoryPull({ customer_number: payload.From });
+    if (memory) {
+      logger.info('✅ [VAULT] Memory pulled successfully', {
+        memoryObject: JSON.stringify(memory, null, 2),
+      });
+    } else {
+      logger.info('ℹ️  [VAULT] No existing memory found for customer');
+    }
+
+    // 7. Merge memory with inbound SMS event
+    if (memory) {
+      logger.info('🔄 [VAULT] Merging inbound SMS event into memory...');
+      const updatedMemory = await memoryMerge(memory, {
+        history: [
+          {
+            timestamp: new Date().toISOString(),
+            event_type: 'inbound_sms',
+            notes: payload.Body,
+          },
+        ],
+        last_interaction: new Date().toISOString(),
+      });
+      logger.info('✅ [VAULT] Memory merged', {
+        memoryObject: JSON.stringify(updatedMemory, null, 2),
+      });
+
+      // 8. Push updated memory
+      logger.info('🔄 [VAULT] Pushing updated memory to DB...');
+      await memoryPush(updatedMemory);
+      logger.info('✅ [VAULT] Memory pushed successfully');
+    }
+
+    // 9. Send into inbound pipeline (FLOW → RUNE)
+    logger.info('🚀 [PIPELINE] Starting inbound pipeline (FLOW → RUNE)...');
+    logger.info('🔄 [FLOW] Calling FLOW agent with IntentObject...');
+
+    const automation = await inboundPipeline(validatedIntent);
+
+    logger.info('✅ [RUNE] AutomationObject received from pipeline');
+    const validatedAutomation = AutomationSchema.parse(automation);
+    logger.info('✅ [RUNE] AutomationObject validated', {
+      automationObject: JSON.stringify(validatedAutomation, null, 2),
+    });
+
+    // 10. Sentinel guard - outbound automation
+    logger.info('🛡️  [SENTINEL] Running automation guard on AutomationObject...');
+    const automationGuard = await sentinelGuard({
+      content: validatedAutomation.reasoning,
+      metadata: { action: validatedAutomation.action },
+    });
+
+    if (!automationGuard.allowed) {
+      logger.warn('❌ [SENTINEL] SMS automation blocked by Sentinel', {
+        reason: automationGuard.reason,
+        anomalies: automationGuard.anomalies,
+      });
+
+      const fallbackMessage = "We'll get back to you shortly.";
+      const fallbackSid = await sendSMS(payload.From, payload.To, fallbackMessage);
+
+      await addMessage({
+        conversationId: conversation.id,
+        clientId: client.id,
+        customerId: customer.id,
+        direction: MessageDirection.OUTBOUND,
+        type: MessageType.SMS,
+        body: fallbackMessage,
+        twilioSid: fallbackSid,
+      });
+
+      res.status(200).send('OK');
+      return;
+    }
+    logger.info('✅ [SENTINEL] Automation guard passed');
+
+    // 11. Convert automation output → backend actions (DISPATCH)
+    logger.info('🔄 [DISPATCH] Converting AutomationObject to backend action...');
+    const backendAction = await automationToBackend(validatedAutomation);
+
+    logger.info('✅ [DISPATCH] Backend action generated', {
+      type: backendAction.type,
+      targets: backendAction.targets,
+      backendAction: JSON.stringify(backendAction, null, 2),
+    });
+
+    // 12. Generate response message (LYRA)
+    logger.info('🔄 [LYRA] Generating response message...');
+    let responseMessage = 'Thanks for your message. We will get back to you soon.';
+
+    if (validatedAutomation.action === 'send_booking_link') {
+      responseMessage = 'Thanks! Here is your booking link: https://booking.jobrun.app';
+    } else if (validatedAutomation.action === 'send_quote_message') {
+      responseMessage =
+        'Thanks for your quote request. We will prepare an estimate and get back to you shortly.';
+    } else if (validatedAutomation.action === 'ask_for_more_info') {
+      responseMessage = 'Could you provide more details about your request?';
+    }
+
+    logger.info('✅ [LYRA] Response message generated', {
+      responseMessage,
+    });
+
+    // 13. Sentinel guard - outbound message
+    logger.info('🛡️  [SENTINEL] Running outbound message guard...');
+    const messageGuard = await sentinelGuard({
+      content: responseMessage,
+      metadata: { customer_number: payload.From },
+    });
+
+    if (!messageGuard.allowed) {
+      logger.warn('❌ [SENTINEL] SMS outbound message blocked', {
+        reason: messageGuard.reason,
+      });
+
+      responseMessage = "We'll get back to you shortly.";
+    }
+    logger.info('✅ [SENTINEL] Outbound message guard passed');
+
+    // 14. Send SMS through existing Twilio wrapper
+    logger.info('📤 [TWILIO] Sending SMS to customer...');
+    const twilioSid = await sendSMS(payload.From, payload.To, responseMessage);
+    logger.info('✅ [TWILIO] SMS sent successfully', {
+      twilioSid,
+    });
+
+    // 15. Save outbound message
+    await addMessage({
+      conversationId: conversation.id,
+      clientId: client.id,
+      customerId: customer.id,
+      direction: MessageDirection.OUTBOUND,
+      type: MessageType.SMS,
+      body: responseMessage,
+      twilioSid,
+    });
+    logger.info('✅ [DB] Outbound message saved');
+
+    // 16. Final memory update with outbound SMS event (VAULT)
+    if (memory) {
+      logger.info('🔄 [VAULT] Merging outbound SMS event into memory...');
+      const finalMemory = await memoryMerge(memory, {
+        history: [
+          {
+            timestamp: new Date().toISOString(),
+            event_type: 'outbound_sms',
+            notes: responseMessage,
+          },
+        ],
+        last_interaction: new Date().toISOString(),
+      });
+      logger.info('✅ [VAULT] Final memory merged', {
+        memoryObject: JSON.stringify(finalMemory, null, 2),
+      });
+
+      logger.info('🔄 [VAULT] Pushing final memory to DB...');
+      await memoryPush(finalMemory);
+      logger.info('✅ [VAULT] Final memory pushed successfully');
+    }
+
+    logger.info('🎉 [SMS INBOUND] Pipeline completed successfully', {
+      customerId: customer.id,
+      conversationId: conversation.id,
+      intent: validatedIntent.intent,
+      automation: validatedAutomation.action,
+      summary: {
+        intent: validatedIntent.intent,
+        action: validatedAutomation.action,
+        responseMessage,
+      },
+    });
+
+    // 17. Respond to Twilio
+    res.status(200).send('OK');
+  } catch (error) {
+    logger.error('❌ [SMS INBOUND] Pipeline error', {
+      error: error instanceof Error ? error.message : String(error),
+      stack: error instanceof Error ? error.stack : undefined,
+    });
+
+    try {
+      const payload: TwilioSMSPayload = req.body;
+      const fallbackMessage =
+        "We're experiencing technical difficulties. We'll get back to you shortly.";
+      await sendSMS(payload.From, payload.To, fallbackMessage);
+      logger.info('✅ [SMS INBOUND] Fallback message sent');
+    } catch (fallbackError) {
+      logger.error('❌ [SMS INBOUND] Failed to send fallback', {
+        error: fallbackError instanceof Error ? fallbackError.message : String(fallbackError),
+      });
+    }
+
+    res.status(200).send('OK');
+  }
+}

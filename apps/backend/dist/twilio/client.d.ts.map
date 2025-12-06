@@ -1,0 +1,1 @@
+{"version":3,"file":"client.d.ts","sourceRoot":"","sources":["../../src/twilio/client.ts"],"names":[],"mappings":"AAAA,OAAO,MAAM,MAAM,QAAQ,CAAC;AAO5B,wBAAgB,eAAe,IAAI,MAAM,CAAC,MAAM,CAa/C;AAED;;GAEG;AACH,wBAAsB,OAAO,CAC3B,EAAE,EAAE,MAAM,EACV,IAAI,EAAE,MAAM,EACZ,IAAI,EAAE,MAAM,GACX,OAAO,CAAC,MAAM,CAAC,CAcjB;AAED;;GAEG;AACH,wBAAgB,kBAAkB,IAAI,MAAM,CAM3C"}

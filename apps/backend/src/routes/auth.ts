@@ -1,0 +1,259 @@
+import { Router } from 'express';
+import bcrypt from 'bcryptjs';
+import jwt from 'jsonwebtoken';
+import { prisma } from '../db';
+import { env } from '../env';
+import { sendSuccess, sendError } from '../utils/response';
+import { ERROR_CODES, HTTP_STATUS } from '../utils/constants';
+import { authenticate } from '../middleware/auth';
+import { AuthenticatedRequest } from '../types/express';
+
+const router = Router();
+
+/**
+ * POST /api/auth/login
+ * User login with email and password
+ */
+router.post('/login', async (req, res) => {
+  try {
+    const { email, password } = req.body;
+
+    // Validate input
+    if (!email || !password) {
+      sendError(
+        res,
+        ERROR_CODES.VALIDATION_ERROR,
+        'Email and password are required',
+        HTTP_STATUS.BAD_REQUEST
+      );
+      return;
+    }
+
+    // Find user by email
+    const user = await prisma.user.findUnique({
+      where: { email },
+      include: {
+        client: true,
+      },
+    });
+
+    if (!user) {
+      sendError(
+        res,
+        ERROR_CODES.UNAUTHORIZED,
+        'Invalid email or password',
+        HTTP_STATUS.UNAUTHORIZED
+      );
+      return;
+    }
+
+    // Verify password
+    const isValidPassword = await bcrypt.compare(password, user.password);
+
+    if (!isValidPassword) {
+      sendError(
+        res,
+        ERROR_CODES.UNAUTHORIZED,
+        'Invalid email or password',
+        HTTP_STATUS.UNAUTHORIZED
+      );
+      return;
+    }
+
+    // Generate JWT token
+    const token = jwt.sign(
+      {
+        sub: user.id,
+        id: user.id,
+        email: user.email,
+        role: user.role,
+        clientId: user.clientId,
+      },
+      env.JWT_SECRET,
+      { expiresIn: '7d' }
+    );
+
+    // Send response
+    sendSuccess(res, {
+      token,
+      user: {
+        id: user.id,
+        email: user.email,
+        role: user.role,
+        clientId: user.clientId,
+        client: user.client ? {
+          id: user.client.id,
+          businessName: user.client.businessName,
+        } : null,
+      },
+    });
+  } catch (error) {
+    console.error('Login error:', error);
+    sendError(
+      res,
+      ERROR_CODES.INTERNAL_ERROR,
+      'Login failed',
+      HTTP_STATUS.INTERNAL_SERVER_ERROR
+    );
+  }
+});
+
+/**
+ * POST /api/auth/logout
+ * User logout (client-side token removal)
+ */
+router.post('/logout', authenticate, (req: AuthenticatedRequest, res) => {
+  // Logout is handled client-side by removing the token
+  // This endpoint exists for consistency and future server-side session management
+  sendSuccess(res, { message: 'Logged out successfully' });
+});
+
+/**
+ * GET /api/auth/me
+ * Get current authenticated user
+ */
+router.get('/me', authenticate, async (req: AuthenticatedRequest, res) => {
+  try {
+    if (!req.user) {
+      sendError(
+        res,
+        ERROR_CODES.UNAUTHORIZED,
+        'Not authenticated',
+        HTTP_STATUS.UNAUTHORIZED
+      );
+      return;
+    }
+
+    // Fetch user with client data
+    const user = await prisma.user.findUnique({
+      where: { id: req.user.id },
+      include: {
+        client: true,
+      },
+    });
+
+    if (!user) {
+      sendError(
+        res,
+        ERROR_CODES.NOT_FOUND,
+        'User not found',
+        HTTP_STATUS.NOT_FOUND
+      );
+      return;
+    }
+
+    sendSuccess(res, {
+      user: {
+        id: user.id,
+        email: user.email,
+        role: user.role,
+        clientId: user.clientId,
+        client: user.client ? {
+          id: user.client.id,
+          businessName: user.client.businessName,
+          region: user.client.region,
+          phoneNumber: user.client.phoneNumber,
+          timezone: user.client.timezone,
+          demoToolsVisible: user.client.demoToolsVisible,
+        } : null,
+      },
+    });
+  } catch (error) {
+    console.error('Get user error:', error);
+    sendError(
+      res,
+      ERROR_CODES.INTERNAL_ERROR,
+      'Failed to get user',
+      HTTP_STATUS.INTERNAL_SERVER_ERROR
+    );
+  }
+});
+
+/**
+ * POST /api/auth/register
+ * Register a new user (admin use only or open registration)
+ */
+router.post('/register', async (req, res) => {
+  try {
+    const { email, password, role = 'CLIENT', clientId } = req.body;
+
+    // Validate input
+    if (!email || !password) {
+      sendError(
+        res,
+        ERROR_CODES.VALIDATION_ERROR,
+        'Email and password are required',
+        HTTP_STATUS.BAD_REQUEST
+      );
+      return;
+    }
+
+    // Check if user already exists
+    const existingUser = await prisma.user.findUnique({
+      where: { email },
+    });
+
+    if (existingUser) {
+      sendError(
+        res,
+        ERROR_CODES.CONFLICT,
+        'User with this email already exists',
+        HTTP_STATUS.CONFLICT
+      );
+      return;
+    }
+
+    // Hash password
+    const hashedPassword = await bcrypt.hash(password, 10);
+
+    // Create user
+    const user = await prisma.user.create({
+      data: {
+        email,
+        password: hashedPassword,
+        role,
+        clientId,
+      },
+      include: {
+        client: true,
+      },
+    });
+
+    // Generate JWT token
+    const token = jwt.sign(
+      {
+        sub: user.id,
+        id: user.id,
+        email: user.email,
+        role: user.role,
+        clientId: user.clientId,
+      },
+      env.JWT_SECRET,
+      { expiresIn: '7d' }
+    );
+
+    sendSuccess(res, {
+      token,
+      user: {
+        id: user.id,
+        email: user.email,
+        role: user.role,
+        clientId: user.clientId,
+        client: user.client ? {
+          id: user.client.id,
+          businessName: user.client.businessName,
+        } : null,
+      },
+    }, HTTP_STATUS.CREATED);
+  } catch (error) {
+    console.error('Registration error:', error);
+    sendError(
+      res,
+      ERROR_CODES.INTERNAL_ERROR,
+      'Registration failed',
+      HTTP_STATUS.INTERNAL_SERVER_ERROR
+    );
+  }
+});
+
+export default router;

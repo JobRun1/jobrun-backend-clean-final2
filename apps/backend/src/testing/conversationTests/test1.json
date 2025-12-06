@@ -1,0 +1,7 @@
+[
+  { "user": "Hi, I need an appointment" },
+  { "user": "Tomorrow morning works" },
+  { "user": "No that time doesn't work" },
+  { "user": "How about after 3?" },
+  { "user": "Yes, book it" }
+]
