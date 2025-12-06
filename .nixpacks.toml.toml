@@ -6,8 +6,8 @@ cmds = ["cd apps/backend && npm ci --legacy-peer-deps --no-audit"]
 
 [phases.build]
 cmds = [
-    "cd apps/backend && npx prisma generate",
-    "cd apps/backend && npx tsc"
+  "cd apps/backend && npx prisma generate",
+  "cd apps/backend && npx tsc"
 ]
 
 [start]
