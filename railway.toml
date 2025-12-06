@@ -1,8 +1,8 @@
 [build]
 builder = "nixpacks"
 
-[start]
-cmd = "node dist/index.js"
-
 [build.nixpacks]
 subdirectory = "apps/backend"
+
+[start]
+cmd = "cd apps/backend && node dist/index.js"

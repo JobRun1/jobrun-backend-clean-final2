@@ -9,7 +9,7 @@
     "build": "npm run build:prisma && npm run build:tsc",
     "migrate:deploy": "npx prisma migrate deploy",
     "migrate:fix": "node scripts/migrate-with-retry.js",
-    "start": "node server.js"
+    "start": "node dist/index.js"
   },
 
   "dependencies": {
