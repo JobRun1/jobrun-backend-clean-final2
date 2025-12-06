@@ -1,3 +1,5 @@
 [build]
-builder = "docker"
 dockerfilePath = "apps/backend/Dockerfile"
+
+[start]
+cmd = "node dist/index.js"
