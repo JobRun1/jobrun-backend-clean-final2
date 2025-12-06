@@ -1,4 +1,5 @@
 [build]
+builder = "docker"
 dockerfilePath = "apps/backend/Dockerfile"
 
 [start]
