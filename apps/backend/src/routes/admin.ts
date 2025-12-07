@@ -16,25 +16,165 @@ router.use(requireAdmin);
 
 /**
  * GET /api/admin/dashboard/stats
- * Get dashboard statistics
+ * Get comprehensive dashboard statistics
  */
 router.get('/dashboard/stats', async (req, res) => {
   try {
-    const [totalClients, activeClients, totalMessages, totalBookings, agentLogs] = await Promise.all([
+    const now = new Date();
+    const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+
+    const [
+      totalClients,
+      activeClients,
+      totalLeads,
+      leadsToday,
+      totalMessages,
+      messagesToday,
+      leadsByState,
+      convertedLeads,
+      allLeads,
+      recentMessages,
+      topClients,
+    ] = await Promise.all([
+      // Total clients
       prisma.client.count(),
-      prisma.client.count(), // TODO: Add status filter when implemented
+
+      // Active clients (with at least one message in last 30 days)
+      prisma.client.count({
+        where: {
+          messages: {
+            some: {
+              createdAt: {
+                gte: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000),
+              },
+            },
+          },
+        },
+      }),
+
+      // Total leads
+      prisma.customer.count(),
+
+      // Leads created today
+      prisma.customer.count({
+        where: {
+          createdAt: {
+            gte: startOfToday,
+          },
+        },
+      }),
+
+      // Total messages
       prisma.message.count(),
-      prisma.booking.count(),
-      prisma.agentLog.count(),
+
+      // Messages today
+      prisma.message.count({
+        where: {
+          createdAt: {
+            gte: startOfToday,
+          },
+        },
+      }),
+
+      // Lead state distribution (using Customer model)
+      prisma.customer.groupBy({
+        by: ['id'],
+        _count: true,
+      }),
+
+      // Converted leads (customers with bookings)
+      prisma.customer.count({
+        where: {
+          bookings: {
+            some: {},
+          },
+        },
+      }),
+
+      // All leads for conversion calculation
+      prisma.customer.count(),
+
+      // Recent messages for activity feed
+      prisma.message.findMany({
+        take: 10,
+        orderBy: {
+          createdAt: 'desc',
+        },
+        include: {
+          client: {
+            select: {
+              businessName: true,
+            },
+          },
+        },
+      }),
+
+      // Top clients by activity
+      prisma.client.findMany({
+        take: 5,
+        include: {
+          _count: {
+            select: {
+              customers: true,
+              messages: true,
+            },
+          },
+        },
+        orderBy: {
+          messages: {
+            _count: 'desc',
+          },
+        },
+      }),
     ]);
+
+    // Calculate conversion rate
+    const conversionRate = allLeads > 0
+      ? Math.round((convertedLeads / allLeads) * 100)
+      : 0;
+
+    // Build lead state distribution (placeholder - JobRun uses Customer model)
+    const leadStateDistribution = {
+      NEW: 0,
+      POST_CALL: 0,
+      POST_CALL_REPLIED: 0,
+      CUSTOMER_REPLIED: 0,
+      QUALIFIED: 0,
+      BOOKED: 0,
+      CONVERTED: convertedLeads,
+      LOST: 0,
+    };
+
+    // Format recent activity
+    const recentActivity = recentMessages.map((msg) => ({
+      id: msg.id,
+      type: msg.direction,
+      clientName: msg.client.businessName,
+      preview: msg.body.substring(0, 100),
+      createdAt: msg.createdAt.toISOString(),
+    }));
+
+    // Format top clients
+    const formattedTopClients = topClients.map((client) => ({
+      id: client.id,
+      businessName: client.businessName,
+      region: client.region,
+      leadCount: client._count.customers,
+      messageCount: client._count.messages,
+    }));
 
     sendSuccess(res, {
       totalClients,
       activeClients,
+      totalLeads,
+      leadsToday,
       totalMessages,
-      totalBookings,
-      revenue: 0, // TODO: Implement billing
-      agentCalls: agentLogs,
+      messagesToday,
+      conversionRate,
+      leadStateDistribution,
+      recentActivity,
+      topClients: formattedTopClients,
     });
   } catch (error) {
     console.error('Failed to fetch dashboard stats:', error);

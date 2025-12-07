@@ -6,6 +6,7 @@ import messagesRouter from './messages';
 import bookingRouter from './booking';
 import calendarRouter from './calendar';
 import adminRouter from './admin';
+import clientRouter from './client';
 import authRouter from './auth';
 import customersRouter from './customers';
 import bookingsRouter from './bookings';
@@ -34,10 +35,13 @@ router.use('/calendar', calendarRouter);
 // Phase 5 routes - Admin Dashboard
 router.use('/admin', adminRouter);
 
+// Client Dashboard routes
+router.use('/client', clientRouter);
+
 // Phase 5.1 routes - Authentication
 router.use('/auth', authRouter);
 
-// Client dashboard routes
+// Other client routes
 router.use('/customers', customersRouter);
 router.use('/bookings', bookingsRouter);
 router.use('/agents', agentsRouter);

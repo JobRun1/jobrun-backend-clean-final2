@@ -1,11 +1,16 @@
 import { Router } from "express";
 import twilio from "twilio";
+import { PrismaClient } from "@prisma/client";
+import { resolveLead } from "../utils/resolveLead";
+import { handleInboundSms } from "../ai/pipelines/inboundSmsPipeline";
 
 const router = Router();
+const prisma = new PrismaClient();
 
 const accountSid = process.env.TWILIO_ACCOUNT_SID!;
 const authToken = process.env.TWILIO_AUTH_TOKEN!;
 const twilioNumber = process.env.TWILIO_NUMBER!;
+const defaultClientId = process.env.DEFAULT_CLIENT_ID!;
 
 const client = twilio(accountSid, authToken);
 
@@ -79,28 +84,80 @@ router.post("/status", async (req, res) => {
 });
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-// 3. INBOUND SMS HANDLER
+// 3. INBOUND SMS HANDLER — AI PIPELINE
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 router.post("/sms", async (req, res) => {
   const from = req.body.From;
   const body = req.body.Body?.trim() || "";
+  const messageSid = req.body.MessageSid;
 
-  console.log("💬 Incoming SMS:", { from, body });
+  console.log("💬 Incoming SMS:", { from, body, messageSid });
 
-  // Simple auto-reply for now
-  const reply =
-    "Thanks for contacting JobRun! This number is monitored by our automated assistant. " +
-    "How can we help you get set up today?";
+  try {
+    const clientRecord = await prisma.client.findUnique({
+      where: { id: defaultClientId },
+    });
 
-  const twiml = `
+    if (!clientRecord) {
+      console.error("❌ Default client not found:", defaultClientId);
+      throw new Error("Client configuration error");
+    }
+
+    const lead = await resolveLead({
+      clientId: clientRecord.id,
+      phone: from,
+    });
+
+    const inboundMessage = await prisma.message.create({
+      data: {
+        clientId: clientRecord.id,
+        customerId: lead.id,
+        direction: "INBOUND",
+        type: "SMS",
+        body,
+        twilioSid: messageSid,
+      },
+    });
+
+    const clientSettings = await prisma.clientSettings.findUnique({
+      where: { clientId: clientRecord.id },
+    });
+
+    const { replyMessage, updatedLead } = await handleInboundSms({
+      client: clientRecord,
+      lead,
+      inboundMessage,
+      clientSettings,
+    });
+
+    if (replyMessage) {
+      const twiml = `
     <Response>
-      <Message>${reply}</Message>
+      <Message>${replyMessage}</Message>
     </Response>
   `;
 
-  res.type("text/xml");
-  res.send(twiml);
+      res.type("text/xml");
+      res.send(twiml);
+    } else {
+      res.type("text/xml");
+      res.send("<Response></Response>");
+    }
+
+  } catch (error) {
+    console.error("❌ SMS webhook error:", error);
+
+    const fallbackReply = "Sorry, I'm having trouble right now. Someone from the team will get back to you shortly.";
+    const twiml = `
+    <Response>
+      <Message>${fallbackReply}</Message>
+    </Response>
+  `;
+
+    res.type("text/xml");
+    res.send(twiml);
+  }
 });
 
 export default router;
