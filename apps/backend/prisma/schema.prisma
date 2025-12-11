@@ -1,8 +1,3 @@
-// =====================================
-// JobRun Phase 2 — Communication Engine
-// Multi-tenant + Communication + Booking
-// =====================================
-
 generator client {
   provider = "prisma-client-js"
 }
@@ -12,168 +7,170 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
-// ================================
-// CLIENT — A business using JobRun
-// ================================
+//
+// ──────────────────────────────────────────────
+// CLIENT
+// ──────────────────────────────────────────────
 model Client {
-  id        String   @id @default(cuid())
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  id               String         @id @default(cuid())
+  createdAt        DateTime       @default(now())
+  updatedAt        DateTime       @updatedAt
+  businessName     String
+  region           String
+  phoneNumber      String?
+  twilioNumber     String?
+  businessHours    Json?
+  timezone         String         @default("America/New_York")
+  demoToolsVisible Boolean        @default(true)
+  demoClient       Boolean        @default(false)
 
-  businessName String
-  region       String
-  phoneNumber  String? // Twilio number for this client
-
-  // Business hours (JSON format)
-  businessHours Json? // {"start": "09:00", "end": "17:00", "days": [1,2,3,4,5]}
-  timezone      String @default("America/New_York")
-
-  // Demo mode control
-  demoToolsVisible Boolean @default(true)
-
-  // Relations
-  users         User[]
-  customers     Customer[]
-  conversations Conversation[]
-  messages      Message[]
-  bookings      Booking[]
+  bookings         Booking[]
+  conversations    Conversation[]
+  customers        Customer[]
+  messages         Message[]
+  users            User[]
+  leads            Lead[]
 
   @@map("clients")
 }
 
-// ================================
-// USER — Auth and access
-// ================================
+//
+// ──────────────────────────────────────────────
+// USER
+// ──────────────────────────────────────────────
 model User {
   id        String   @id @default(cuid())
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  email    String   @unique
-  password String // Hashed password
-  role     UserRole
+  email     String   @unique
+  password  String
+  role      UserRole
 
-  // Multi-tenant relation
-  clientId String?
-  client   Client? @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  clientId  String?
+  client    Client?  @relation(fields: [clientId], references: [id], onDelete: Cascade)
 
   @@map("users")
 }
 
-// ================================
-// CUSTOMER — A customer/lead
-// ================================
+//
+// ──────────────────────────────────────────────
+// CUSTOMER
+// ──────────────────────────────────────────────
+// REQUIRED FOR ADMIN DASHBOARD
+//
 model Customer {
-  id        String   @id @default(cuid())
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  id            String         @id @default(cuid())
+  createdAt     DateTime       @default(now())
+  updatedAt     DateTime       @updatedAt
 
-  clientId String
-  client   Client @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  clientId      String
+  client        Client         @relation(fields: [clientId], references: [id], onDelete: Cascade)
 
-  phone String // Customer's phone number
-  name  String? // Customer name (collected later)
-  email String? // Customer email (optional)
+  phone         String
+  name          String?
+  email         String?
 
-  // Relations
-  messages      Message[]
-  conversations Conversation[]
+  // NEW FIELD REQUIRED BY DASHBOARD
+  state         CustomerState  @default(NEW)
+
   bookings      Booking[]
+  conversations Conversation[]
+  messages      Message[]
+  leads         Lead[]
 
   @@unique([clientId, phone], name: "clientId_phone")
   @@index([clientId])
   @@index([phone])
+  @@index([state])
   @@map("customers")
 }
 
-// ================================
-// CONVERSATION — Thread of messages
-// ================================
+//
+// ──────────────────────────────────────────────
+// CONVERSATION
+// ──────────────────────────────────────────────
 model Conversation {
-  id        String   @id @default(cuid())
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  id         String    @id @default(cuid())
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
 
-  clientId String
-  client   Client @relation(fields: [clientId], references: [id], onDelete: Cascade)
-
+  clientId   String
   customerId String?
+
+  client     Client    @relation(fields: [clientId], references: [id], onDelete: Cascade)
   customer   Customer? @relation(fields: [customerId], references: [id], onDelete: Cascade)
 
-  // Relations
-  messages Message[]
+  messages   Message[]
 
   @@index([clientId])
   @@index([customerId])
   @@map("conversations")
 }
 
-// ================================
-// MESSAGE — Individual message
-// ================================
+//
+// ──────────────────────────────────────────────
+// MESSAGE
+// ──────────────────────────────────────────────
 model Message {
-  id        String   @id @default(cuid())
-  createdAt DateTime @default(now())
+  id             String           @id @default(cuid())
+  createdAt      DateTime         @default(now())
 
-  clientId String
-  client   Client @relation(fields: [clientId], references: [id], onDelete: Cascade)
-
-  customerId String?
-  customer   Customer? @relation(fields: [customerId], references: [id], onDelete: SetNull)
-
+  clientId       String
+  customerId     String?
   conversationId String?
-  conversation   Conversation? @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  leadId         String?
 
-  direction MessageDirection
-  type      MessageType
-  body      String           @db.Text
+  direction      MessageDirection
+  type           MessageType
+  body           String
 
-  // Twilio metadata
-  twilioSid String? @unique
+  twilioSid      String?          @unique
+  metadata       Json?
 
-  // System metadata
-  metadata Json?
+  client         Client           @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  customer       Customer?        @relation(fields: [customerId], references: [id])
+  conversation   Conversation?    @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  lead           Lead?            @relation(fields: [leadId], references: [id])
 
   @@index([clientId])
   @@index([customerId])
   @@index([conversationId])
+  @@index([leadId])
   @@index([createdAt])
   @@map("messages")
 }
 
-// ================================
-// BOOKING — Calendar appointment
-// ================================
+//
+// ──────────────────────────────────────────────
+// BOOKING
+// ──────────────────────────────────────────────
 model Booking {
-  id        String   @id @default(cuid())
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  id               String          @id @default(cuid())
+  createdAt        DateTime        @default(now())
+  updatedAt        DateTime        @updatedAt
 
-  clientId String
-  client   Client @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  clientId         String
+  customerId       String?
 
-  customerId String?
-  customer   Customer? @relation(fields: [customerId], references: [id], onDelete: SetNull)
+  start            DateTime
+  end              DateTime
+  status           BookingStatus   @default(NEW)
 
-  start  DateTime
-  end    DateTime
-  status BookingStatus @default(NEW)
+  customerName     String?
+  customerPhone    String?
+  customerEmail    String?
+  notes            String?
 
-  customerName  String?
-  customerPhone String?
-  customerEmail String?
-
-  notes String? @db.Text
-  color String? @db.VarChar
-
-  // Recurrence support
+  color            String?         @db.VarChar
   recurrenceRuleId String?         @db.VarChar
-  recurrenceRule   RecurrenceRule? @relation(fields: [recurrenceRuleId], references: [id])
   isAllDay         Boolean         @default(false)
+  externalSyncId   String?         @db.VarChar
+  externalCalendar String?         @db.VarChar
 
-  // External calendar sync (for future Google sync)
-  externalSyncId   String? @db.VarChar
-  externalCalendar String? @db.VarChar
+  client           Client          @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  customer         Customer?       @relation(fields: [customerId], references: [id])
+  recurrenceRule   RecurrenceRule? @relation(fields: [recurrenceRuleId], references: [id])
 
   @@index([clientId, start])
   @@index([clientId, status])
@@ -183,73 +180,76 @@ model Booking {
   @@map("bookings")
 }
 
-// ================================
-// RECURRENCE RULE — Booking recurrence patterns
-// ================================
+//
+// ──────────────────────────────────────────────
+// RECURRENCE RULE
+// ──────────────────────────────────────────────
 model RecurrenceRule {
   id          String              @id @default(cuid())
   clientId    String
+
   frequency   RecurrenceFrequency
   interval    Int                 @default(1)
-  byWeekday   String? // Comma-separated weekdays
-  byMonthday  String? // For monthly rules
+
+  byWeekday   String?
+  byMonthday  String?
   endDate     DateTime?
   occurrences Int?
-  bookings    Booking[]
+
   createdAt   DateTime            @default(now())
   updatedAt   DateTime            @updatedAt
+
+  bookings    Booking[]
 
   @@map("recurrence_rules")
 }
 
-// ================================
-// WEEKLY AVAILABILITY — Recurring weekly availability slots
-// ================================
+//
+// ──────────────────────────────────────────────
+// WEEKLY AVAILABILITY
+// ──────────────────────────────────────────────
 model WeeklyAvailability {
   id        String @id @default(cuid())
   clientId  String
-  weekday   Int // 0=Sun, 6=Sat
-  startTime String // "09:00"
-  endTime   String // "17:00"
+  weekday   Int
+  startTime String
+  endTime   String
 
   @@map("weekly_availability")
 }
 
-// ================================
-// BLOCKED TIME — Manual blocked time periods
-// ================================
+//
+// ──────────────────────────────────────────────
+// BLOCKED TIME
+// ──────────────────────────────────────────────
 model BlockedTime {
   id       String   @id @default(cuid())
   clientId String
   date     DateTime
-  start    String? // null means all-day
+  start    String?
   end      String?
   reason   String?
 
   @@map("blocked_times")
 }
 
-// ================================
-// AGENT LOG — Phase 3 Agent System
-// ================================
+//
+// ──────────────────────────────────────────────
+// AGENT LOG
+// ──────────────────────────────────────────────
 model AgentLog {
-  id        String   @id @default(cuid())
-  createdAt DateTime @default(now())
+  id              String   @id @default(cuid())
+  createdAt       DateTime @default(now())
 
-  agentName String
+  agentName       String
+  clientId        String
+  customerId      String?
+  conversationId  String?
 
-  clientId String
-
-  customerId String?
-
-  conversationId String?
-
-  trigger String // AgentTriggerType as string
-
-  input  Json // AgentContext input
-  output Json? // AgentOutput or null if failed
-  error  String? @db.Text
-
+  trigger         String
+  input           Json
+  output          Json?
+  error           String?
   executionTimeMs Int
 
   @@index([clientId])
@@ -260,87 +260,99 @@ model AgentLog {
   @@map("agent_logs")
 }
 
-// ================================
-// CLIENT SETTINGS — Phase 3 Business Settings
-// ================================
+//
+// ──────────────────────────────────────────────
+// CLIENT SETTINGS
+// ──────────────────────────────────────────────
 model ClientSettings {
-  id        String   @id @default(cuid())
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  id            String   @id @default(cuid())
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
 
-  clientId String @unique
+  clientId      String   @unique
 
-  // Business Information
-  businessName String?
-  services     String? @db.Text // Comma-separated or JSON
-  availability String? @db.Text // Business hours description
-  pricing      String? @db.Text // Pricing information
-
-  // Contact
-  phoneNumber String?
-  email       String?
-  website     String?
-
-  // Service Area
-  serviceArea String? @db.Text
-
-  // Theme Configuration
-  theme Json? // Stores ThemeConfig object: { name, id, colors, glow }
-
-  // Agent Settings
-  agentSettings Json? // Stores agent enable/disable states
-
-  // Additional settings as JSON
-  metadata Json?
+  businessName  String?
+  services      String?
+  availability  String?
+  pricing       String?
+  phoneNumber   String?
+  email         String?
+  website       String?
+  serviceArea   String?
+  theme         Json?
+  agentSettings Json?
+  metadata      Json?
 
   @@map("client_settings")
 }
 
-// ================================
-// LEAD — Phase 3 Lead Management
-// ================================
+//
+// ──────────────────────────────────────────────
+// LEAD (VAULT V1)
+// ──────────────────────────────────────────────
 model Lead {
-  id        String   @id @default(cuid())
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  id            String    @id @default(cuid())
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
 
-  clientId String
+  clientId      String
+  customerId    String
 
-  phone String
-  name  String?
-  email String?
+  state         LeadState @default(NEW)
+  jobType       String    @default("")
+  urgency       String    @default("")
+  location      String    @default("")
+  requestedTime String    @default("")
+  notes         String    @default("")
 
-  source LeadSource @default(INBOUND)
-  status LeadStatus @default(NEW)
+  sentBooking   Boolean   @default(false)
+  askedClarify  Boolean   @default(false)
+  escalated     Boolean   @default(false)
 
-  notes String? @db.Text
+  client        Client    @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  customer      Customer  @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  messages      Message[]
 
-  // Qualification data
-  qualificationData Json?
-
-  @@unique([clientId, phone], name: "clientId_phone")
+  @@unique([clientId, customerId], name: "clientId_customerId")
   @@index([clientId])
-  @@index([phone])
-  @@index([status])
+  @@index([customerId])
+  @@index([state])
   @@map("leads")
 }
 
-// ================================
-// HANDOVER STATE — Phase 11A Human Handover
-// ================================
-model HandoverState {
+//
+// ──────────────────────────────────────────────
+// IMPERSONATION LOG
+// ──────────────────────────────────────────────
+model ImpersonationLog {
   id        String   @id @default(cuid())
+  adminId   String
+  clientId  String
   createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  expiresAt DateTime
 
-  conversationId String @unique
-  clientId       String
+  @@index([adminId])
+  @@index([clientId])
+  @@index([createdAt])
+  @@map("impersonation_logs")
+}
 
-  active       Boolean
-  reason       String?    @db.Text
-  urgencyScore Int        @default(5)
-  triggers     Json? // Array of trigger strings
+//
+// ──────────────────────────────────────────────
+// HANDOVER STATE
+// ──────────────────────────────────────────────
+model HandoverState {
+  id                 String    @id @default(cuid())
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
 
+  conversationId     String    @unique
+  clientId           String
+
+  active             Boolean
+  reason             String?
+  urgencyScore       Int       @default(5)
+  triggers           Json?
   lastNotificationAt DateTime?
 
   @@index([clientId])
@@ -349,10 +361,10 @@ model HandoverState {
   @@map("handover_states")
 }
 
-// ================================
+//
+// ──────────────────────────────────────────────
 // ENUMS
-// ================================
-
+// ──────────────────────────────────────────────
 enum UserRole {
   ADMIN
   CLIENT
@@ -401,4 +413,26 @@ enum LeadStatus {
   QUALIFIED
   CONVERTED
   LOST
+}
+
+// REQUIRED FOR DASHBOARD
+enum CustomerState {
+  NEW
+  POST_CALL
+  POST_CALL_REPLIED
+  CUSTOMER_REPLIED
+  QUALIFIED
+  BOOKED
+  CONVERTED
+  LOST
+}
+
+// VAULT V1 Lead States
+enum LeadState {
+  NEW
+  NEEDS_INFO
+  QUALIFIED
+  URGENT
+  AWAITING_BOOKING
+  CLOSED
 }

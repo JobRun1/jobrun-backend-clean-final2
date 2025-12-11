@@ -1,0 +1,41 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+body {
+  background: #F5F5F5;
+  font-family: var(--font-sans, Inter, sans-serif);
+  color: #0A0A0A;
+}
+
+.dark body {
+  background: #0A0A0A;
+  color: #F5F5F5;
+}
+
+/* Cards */
+@layer components {
+  .card {
+    @apply bg-white dark:bg-jobrun-grey-dark rounded-xl shadow-card p-6 transition-all duration-200;
+  }
+  .card:hover {
+    @apply shadow-cardHover;
+  }
+}
+
+/* Page titles */
+@layer components {
+  .page-title {
+    @apply text-3xl font-bold text-jobrun-black dark:text-jobrun-grey-light;
+  }
+  .page-subtitle {
+    @apply text-sm text-jobrun-grey mt-1;
+  }
+}
+
+/* Brand gradient */
+@layer utilities {
+  .jobrun-gradient {
+    background: linear-gradient(135deg, #22C55E, #15803D);
+  }
+}

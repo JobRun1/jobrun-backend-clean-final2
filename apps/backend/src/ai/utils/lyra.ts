@@ -1,25 +1,48 @@
+/**
+ * LYRA — Outbound Message Generator for JobRun
+ *
+ * Produces short, clear, friendly, professional SMS replies based on:
+ * - The action chosen by RUNE
+ * - Client configuration (business name, booking link)
+ * - Extracted details from FLOW
+ */
+
 import { LLMClient } from "../../llm/LLMClient";
 import { ClientSettings, Message } from "@prisma/client";
-import { NextAction } from "./rune";
-import { IntentType } from "./dial";
 import { ExtractedEntities } from "./flow";
+
+export type LyraAction =
+  | "SEND_CLARIFY_QUESTION"
+  | "SEND_BOOKING_LINK"
+  | "SEND_BOOKING_AND_ALERT"
+  | "SEND_POLITE_DECLINE";
 
 export interface GenerateReplyParams {
   clientSettings: ClientSettings | null;
-  action: NextAction;
-  intent: IntentType;
+  action: LyraAction;
   entities: ExtractedEntities;
   recentMessages: Message[];
   businessName?: string;
 }
 
-function getAiTone(clientSettings: ClientSettings | null): string {
-  if (!clientSettings?.metadata || typeof clientSettings.metadata !== "object") {
-    return "friendly and professional";
-  }
+interface LyraInput {
+  action: LyraAction;
+  flow: {
+    job_type?: string;
+    urgency?: string;
+    location?: string;
+    requested_time?: string;
+    customer_name?: string;
+    extra_notes?: string;
+  };
+  config: {
+    business_name: string;
+    booking_link?: string;
+  };
+}
 
-  const metadata = clientSettings.metadata as Record<string, unknown>;
-  return (metadata.aiTone as string) || "friendly and professional";
+interface LyraOutput {
+  message: string;
 }
 
 function getBookingUrl(clientSettings: ClientSettings | null): string | null {
@@ -31,105 +54,180 @@ function getBookingUrl(clientSettings: ClientSettings | null): string | null {
   return (metadata.bookingUrl as string) || null;
 }
 
-function buildSystemPrompt(params: GenerateReplyParams): string {
-  const { clientSettings, businessName } = params;
-  const tone = getAiTone(clientSettings);
-  const name = businessName || clientSettings?.businessName || "our business";
+const SYSTEM_PROMPT = `You are LYRA — the outbound message generator for JobRun.
 
-  return `You are an AI assistant for ${name}, a home services business.
+Your job is to produce short, clear, friendly, professional SMS replies based on:
+- The action chosen by RUNE
+- The client configuration (business name, booking link, custom first SMS)
+- The extracted details from FLOW
 
-Your personality and tone: ${tone}
+You MUST output STRICT JSON ONLY with NO additional text.
 
-Your job is to communicate with customers via SMS (text message).
+##############################################
+POSSIBLE ACTIONS YOU MUST HANDLE
+##############################################
 
-Rules:
-- Keep responses SHORT and conversational (SMS should be 1-3 sentences max)
-- Be helpful and friendly
-- Ask one question at a time
-- Use natural, human language (no corporate jargon)
-- Never use emojis or special characters
-- Focus on helping the customer book or describe their needs
-- If you have a booking link to share, present it naturally
+1. SEND_CLARIFY_QUESTION
+2. SEND_BOOKING_LINK
+3. SEND_BOOKING_AND_ALERT
+4. SEND_POLITE_DECLINE
 
-You are responding to a customer text message. Generate a single SMS reply.`;
+##############################################
+STRICT OUTPUT FORMAT
+##############################################
+
+Respond ONLY with:
+
+{
+  "message": ""
 }
 
-function buildUserPrompt(params: GenerateReplyParams): string {
-  const { action, intent, entities, recentMessages } = params;
-  const bookingUrl = getBookingUrl(params.clientSettings);
+Rules for the "message" field:
+- Maximum 2 sentences.
+- Friendly but efficient.
+- No emojis.
+- No ellipses.
+- No filler language.
+- No disclaimers.
+- No references to AI, systems, automation, or JobRun.
+- Never mention RUNE, DIAL, FLOW, or any internal logic.
+- Use the business name naturally when appropriate.
+- If the booking link is provided, embed it as-is.
+- Do not fabricate details not present in the input.
 
+##############################################
+ACTION RULES
+##############################################
+
+### 1. SEND_CLARIFY_QUESTION
+Use when job details are unclear.
+Message style:
+- Ask for a brief, specific clarification.
+- Tone: helpful + concise.
+
+Examples:
+"Thanks for your message. Could you tell me a little more about the issue so we can assist you properly?"
+"Could you give a few more details about the problem so we know how to help?"
+
+### 2. SEND_BOOKING_LINK
+Use for normal jobs with clear details.
+Message style:
+- Acknowledge the job.
+- Provide booking link.
+- Encourage booking.
+
+Examples:
+"Thanks for getting in touch. You can book an appointment here: {booking_link}."
+"We can help with that — please book a time that suits you here: {booking_link}."
+
+### 3. SEND_BOOKING_AND_ALERT
+Use for urgent or safety-related issues.
+Message style:
+- Acknowledge urgency.
+- Provide booking link.
+- Inform customer someone will review shortly.
+
+Examples:
+"Thanks for your message. This sounds urgent — please book here and we'll review it straight away: {booking_link}."
+"That sounds time-sensitive. Use this link to book immediately and we'll prioritise it: {booking_link}."
+
+### 4. SEND_POLITE_DECLINE
+Used for spam, irrelevant messages, or services the client does not provide.
+Message style:
+- Polite.
+- Short.
+- Firm.
+- No judgement.
+
+Examples:
+"Thanks for reaching out, but we aren't able to help with this request."
+"Appreciate the message. This isn't something we can assist with."
+
+##############################################
+VARIABLE RULES
+##############################################
+
+- {business_name}: Use only when it feels natural.
+- {booking_link}: Always include when RUNE chooses a booking action.
+- If customer_name is provided, you may address them using their first name, but only if natural.
+- Do not invent any variables not present in input.
+
+##############################################
+ABSOLUTE RULES
+##############################################
+
+- Always return JSON.
+- Never write outside the JSON.
+- Never show reasoning.
+- Never output internal agent names or anything about decision logic.
+- Never ask unnecessary questions.
+- Keep everything clean, short, and professional.`;
+
+function buildUserPrompt(input: LyraInput, recentMessages: Message[]): string {
   const conversationHistory = recentMessages
-    .slice(-5)
+    .slice(-3)
     .map((msg) => `${msg.direction}: ${msg.body}`)
     .join("\n");
-
-  let actionGuidance = "";
-
-  if (action === "ASK_QUESTION") {
-    if (intent === "GREETING") {
-      actionGuidance = "Warmly greet the customer and ask how you can help them today.";
-    } else if (intent === "JOB_DESCRIPTION") {
-      actionGuidance = "Ask a clarifying question about their job to gather more details (e.g., location, timing, specifics).";
-    } else if (intent === "QUESTION") {
-      actionGuidance = "Answer their question helpfully and briefly. If you don't have enough info, ask for clarification.";
-    } else {
-      actionGuidance = "Ask a helpful follow-up question to better understand their needs.";
-    }
-  } else if (action === "SEND_BOOKING_LINK") {
-    if (bookingUrl) {
-      actionGuidance = `Send them the booking link naturally. The URL is: ${bookingUrl}. Introduce it with a short sentence like "You can book a time here: [URL]"`;
-    } else {
-      actionGuidance = "Let them know someone will reach out shortly to schedule with them.";
-    }
-  } else if (action === "ACK_ONLY") {
-    if (intent === "CLOSING") {
-      actionGuidance = "Say a friendly goodbye or thank you.";
-    } else {
-      actionGuidance = "Acknowledge their message briefly and positively.";
-    }
-  }
-
-  const entityContext = Object.keys(entities).length > 0
-    ? `\nExtracted info: ${JSON.stringify(entities)}`
-    : "";
 
   return `Recent conversation:
 ${conversationHistory || "(No previous messages)"}
 
-Current intent: ${intent}
-Your task: ${actionGuidance}${entityContext}
+Input:
+${JSON.stringify(input, null, 2)}
 
-Generate a single SMS reply (short, natural, conversational):`;
+Generate the SMS reply following the rules for action: ${input.action}`;
 }
 
 export async function generateReply(
   params: GenerateReplyParams
 ): Promise<string> {
-  const { action } = params;
+  const { action, entities, recentMessages, clientSettings, businessName } = params;
 
-  if (action === "NO_REPLY") {
-    return "";
-  }
+  const bookingUrl = getBookingUrl(clientSettings);
+  const name = businessName || clientSettings?.businessName || "our business";
 
-  const systemPrompt = buildSystemPrompt(params);
-  const userPrompt = buildUserPrompt(params);
+  // Build LYRA input
+  const lyraInput: LyraInput = {
+    action,
+    flow: {
+      job_type: entities.jobType,
+      urgency: entities.urgency,
+      location: entities.location,
+      requested_time: entities.requestedTime,
+      customer_name: entities.customerName,
+      extra_notes: entities.extraDetails,
+    },
+    config: {
+      business_name: name,
+      booking_link: bookingUrl || undefined,
+    },
+  };
+
+  const userPrompt = buildUserPrompt(lyraInput, recentMessages);
 
   const llm = new LLMClient();
   const response = await llm.generate({
     model: "gpt-4o",
-    systemPrompt,
+    systemPrompt: SYSTEM_PROMPT,
     userPrompt,
-    temperature: 0.8,
+    temperature: 0.7,
     maxTokens: 200,
+    jsonMode: true,
   });
 
-  let reply = response.content.trim();
+  try {
+    const parsed: LyraOutput = JSON.parse(response.content);
+    let message = parsed.message.trim();
 
-  reply = reply.replace(/^["']|["']$/g, "");
+    // Ensure SMS length limit
+    if (message.length > 1600) {
+      message = message.substring(0, 1600);
+    }
 
-  if (reply.length > 1600) {
-    reply = reply.substring(0, 1597) + "...";
+    return message;
+  } catch (err) {
+    console.error("LYRA: Failed to parse JSON response:", err);
+    // Fallback message
+    return "Thanks for your message. Someone from the team will get back to you shortly.";
   }
-
-  return reply;
 }

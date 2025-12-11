@@ -1,35 +1,43 @@
-import { PrismaClient, Client, Lead, Message, ClientSettings, LeadStatus } from "@prisma/client";
+import { PrismaClient, Client, Customer, Lead, Message, ClientSettings } from "@prisma/client";
 import { runSentinelGuard } from "../utils/sentinel";
-import { getLeadContext } from "../utils/vault";
 import { classifyIntent } from "../utils/dial";
 import { extractEntities } from "../utils/flow";
-import { decideNextAction } from "../utils/rune";
+import { decideAction, RuneInput } from "../../services/rune";
 import { generateReply } from "../utils/lyra";
 import { logAiEvent } from "../utils/aiLogger";
+import { NotificationService } from "../../services/NotificationService";
+import {
+  getOrCreateLead,
+  updateLeadFromFlow,
+  computeNextState,
+  transitionLeadState,
+  markBookingSent,
+  markClarificationAsked,
+  markEscalated,
+} from "../../services/vault";
 
 const prisma = new PrismaClient();
 
 export interface HandleInboundSmsParams {
   client: Client;
-  lead: Lead;
+  customer: Customer;
   inboundMessage: Message;
   clientSettings: ClientSettings | null;
 }
 
 export interface HandleInboundSmsResult {
   replyMessage?: string;
-  updatedLead: Lead;
 }
 
 export async function handleInboundSms(
   params: HandleInboundSmsParams
 ): Promise<HandleInboundSmsResult> {
-  const { client, lead, inboundMessage, clientSettings } = params;
+  const { client, customer, inboundMessage, clientSettings } = params;
 
   console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
   console.log("🤖 INBOUND SMS AI PIPELINE START");
   console.log(`Client: ${client.businessName}`);
-  console.log(`Lead: ${lead.phone} (${lead.status})`);
+  console.log(`Customer: ${customer.phone} (${customer.state})`);
   console.log(`Message: "${inboundMessage.body}"`);
   console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
 
@@ -37,7 +45,7 @@ export async function handleInboundSms(
     console.log("1️⃣ SENTINEL: Running safety guard on inbound message...");
     const sentinelResult = await runSentinelGuard({
       clientId: client.id,
-      lead,
+      lead: customer as any, // SENTINEL still expects old format, will be fixed separately
       messageText: inboundMessage.body,
     });
 
@@ -46,7 +54,7 @@ export async function handleInboundSms(
 
       await logAiEvent({
         clientId: client.id,
-        leadId: lead.id,
+        leadId: customer.id,
         direction: "SYSTEM",
         type: "EVENT",
         content: `SENTINEL blocked message: ${sentinelResult.reason}`,
@@ -55,16 +63,29 @@ export async function handleInboundSms(
 
       return {
         replyMessage: "Sorry, I'm having trouble processing your message. Someone from the team will get back to you shortly.",
-        updatedLead: lead,
       };
     }
     console.log("✅ SENTINEL: Message passed safety checks");
 
-    console.log("2️⃣ VAULT: Loading conversation context...");
-    const context = await getLeadContext({
+    console.log("2️⃣ VAULT: Get or create lead...");
+    let lead = await getOrCreateLead({
       clientId: client.id,
-      leadId: lead.id,
+      customerId: customer.id,
     });
+    console.log(`✅ VAULT: Lead ${lead.id} (state: ${lead.state})`);
+
+    console.log("2️⃣b VAULT: Loading conversation context...");
+    const messages = await prisma.message.findMany({
+      where: {
+        clientId: client.id,
+        customerId: customer.id,
+      },
+      orderBy: {
+        createdAt: "desc",
+      },
+      take: 20,
+    });
+    const context = { messages: messages.reverse() };
     console.log(`✅ VAULT: Loaded ${context.messages.length} messages`);
 
     console.log("3️⃣ DIAL: Classifying intent...");
@@ -83,42 +104,96 @@ export async function handleInboundSms(
     console.log(`✅ FLOW: Extracted entities:`, entities);
 
     console.log("5️⃣ RUNE: Deciding next action...");
-    const decision = await decideNextAction({
-      lead,
-      intent: intentResult.intent,
-      entities,
-      clientSettings,
-      messageCount: context.messages.length,
-    });
-    console.log(`✅ RUNE: Action = ${decision.action}, StateEvent = ${decision.stateEvent || "none"}`);
-    console.log(`   Explanation: ${decision.explanation}`);
 
-    console.log("6️⃣ STATE MACHINE: Applying state transition...");
-    let updatedLead = lead;
-    if (decision.stateEvent) {
-      const newStatus = computeNewStatus(lead.status, decision.stateEvent);
-      if (newStatus !== lead.status) {
-        updatedLead = await prisma.lead.update({
-          where: { id: lead.id },
-          data: { status: newStatus },
-        });
-        console.log(`✅ STATE: ${lead.status} → ${newStatus}`);
-      } else {
-        console.log(`✅ STATE: No change (${lead.status})`);
-      }
-    } else {
-      console.log("✅ STATE: No transition triggered");
+    // Build RUNE input
+    const hasBookingUrl = !!(
+      clientSettings?.metadata &&
+      typeof clientSettings.metadata === "object" &&
+      "bookingUrl" in clientSettings.metadata &&
+      clientSettings.metadata.bookingUrl
+    );
+
+    const runeInput: RuneInput = {
+      intent: intentResult.intent,
+      certainty: intentResult.confidence,
+      flow: {
+        job_type: entities.jobType,
+        urgency_description: entities.urgency,
+        location: entities.location,
+        requested_time: entities.requestedTime,
+        customer_name: entities.customerName,
+        extra_notes: entities.extraDetails,
+        confidence: intentResult.confidence,
+      },
+      config: {
+        booking_link_enabled: hasBookingUrl,
+      },
+    };
+
+    const decision = decideAction(runeInput);
+    console.log(`✅ RUNE: Action = ${decision.action}`);
+    console.log(`   Reason: ${decision.reason}`);
+
+    console.log("5️⃣b VAULT: Update lead with FLOW data...");
+    lead = await updateLeadFromFlow({ lead, entities });
+    console.log(`✅ VAULT: Lead updated with FLOW data`);
+
+    console.log("6️⃣ VAULT: Applying state transition & memory flags...");
+    const nextState = computeNextState(lead.state, decision.action);
+    lead = await transitionLeadState({ lead, newState: nextState });
+
+    // Set memory flags based on action
+    if (decision.action === "SEND_BOOKING_LINK" && !lead.sentBooking) {
+      lead = await markBookingSent(lead.id);
     }
 
+    if (decision.action === "SEND_CLARIFY_QUESTION" && !lead.askedClarify) {
+      lead = await markClarificationAsked(lead.id);
+    }
+
+    if (decision.action === "SEND_BOOKING_AND_ALERT" && !lead.escalated) {
+      lead = await markEscalated(lead.id);
+    }
+
+    // Update message record to link to lead
+    await prisma.message.update({
+      where: { id: inboundMessage.id },
+      data: { leadId: lead.id },
+    });
+
+    console.log(`✅ VAULT: State = ${lead.state}, Flags = { sentBooking: ${lead.sentBooking}, askedClarify: ${lead.askedClarify}, escalated: ${lead.escalated} }`);
+
     console.log("7️⃣ LYRA: Generating reply...");
+
     const replyMessage = await generateReply({
       clientSettings,
       action: decision.action,
-      intent: intentResult.intent,
       entities,
       recentMessages: context.messages,
       businessName: client.businessName,
     });
+
+    // URGENT ALERT: Send notification if action is SEND_BOOKING_AND_ALERT
+    if (decision.action === "SEND_BOOKING_AND_ALERT") {
+      console.log("🚨 ALERT: Urgent lead detected - sending notification...");
+      try {
+        const dashboardLink = `${process.env.FRONTEND_URL || "https://app.jobrun.com"}/admin/messages?leadId=${lead.id}`;
+        await NotificationService.sendHandoverNotification(client.id, {
+          conversationId: lead.id,
+          customerName: customer.name || undefined,
+          customerPhone: customer.phone,
+          lastMessages: context.messages.slice(-3).map((m) => m.body),
+          urgencyScore: 100,
+          urgencyLevel: "HIGH",
+          reason: `Urgent ${runeInput.flow.job_type || "issue"}: ${runeInput.flow.urgency_description || "immediate attention needed"}`,
+          triggers: [decision.reason],
+          dashboardLink,
+        });
+        console.log("✅ ALERT: Notification sent successfully");
+      } catch (err) {
+        console.error("❌ ALERT: Failed to send notification:", err);
+      }
+    }
 
     if (replyMessage) {
       console.log(`✅ LYRA: Generated reply (${replyMessage.length} chars)`);
@@ -127,7 +202,7 @@ export async function handleInboundSms(
       console.log("8️⃣ SENTINEL: Final safety check on outbound...");
       const outboundGuard = await runSentinelGuard({
         clientId: client.id,
-        lead: updatedLead,
+        lead: customer as any, // SENTINEL still expects old format
         messageText: replyMessage,
       });
 
@@ -145,7 +220,6 @@ export async function handleInboundSms(
 
         return {
           replyMessage: "Thank you for your message. Someone from the team will get back to you shortly.",
-          updatedLead,
         };
       }
       console.log("✅ SENTINEL: Outbound message passed checks");
@@ -153,7 +227,7 @@ export async function handleInboundSms(
       console.log("9️⃣ LOGGER: Recording outbound message...");
       await logAiEvent({
         clientId: client.id,
-        leadId: updatedLead.id,
+        leadId: lead.id,
         direction: "OUTBOUND",
         type: "SMS",
         content: replyMessage,
@@ -174,7 +248,6 @@ export async function handleInboundSms(
 
     return {
       replyMessage: replyMessage || undefined,
-      updatedLead,
     };
 
   } catch (error) {
@@ -182,7 +255,7 @@ export async function handleInboundSms(
 
     await logAiEvent({
       clientId: client.id,
-      leadId: lead.id,
+      leadId: customer.id,
       direction: "SYSTEM",
       type: "EVENT",
       content: `Pipeline error: ${error instanceof Error ? error.message : "Unknown error"}`,
@@ -191,27 +264,6 @@ export async function handleInboundSms(
 
     return {
       replyMessage: "Sorry, I'm having trouble right now. Someone from the team will get back to you shortly.",
-      updatedLead: lead,
     };
   }
-}
-
-function computeNewStatus(currentStatus: LeadStatus, stateEvent: string): LeadStatus {
-  if (stateEvent === "CONTACTED" && currentStatus === "NEW") {
-    return "CONTACTED";
-  }
-
-  if (stateEvent === "QUALIFIED" && (currentStatus === "NEW" || currentStatus === "CONTACTED")) {
-    return "QUALIFIED";
-  }
-
-  if (stateEvent === "CONVERTED") {
-    return "CONVERTED";
-  }
-
-  if (stateEvent === "LOST") {
-    return "LOST";
-  }
-
-  return currentStatus;
 }

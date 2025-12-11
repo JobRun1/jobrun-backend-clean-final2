@@ -1,11 +1,10 @@
 import { Router } from "express";
 import twilio from "twilio";
-import { PrismaClient } from "@prisma/client";
-import { resolveLead } from "../utils/resolveLead";
+import { prisma } from "../db";
+import { resolveCustomer } from "../utils/resolveCustomer";
 import { handleInboundSms } from "../ai/pipelines/inboundSmsPipeline";
 
 const router = Router();
-const prisma = new PrismaClient();
 
 const accountSid = process.env.TWILIO_ACCOUNT_SID!;
 const authToken = process.env.TWILIO_AUTH_TOKEN!;
@@ -104,7 +103,7 @@ router.post("/sms", async (req, res) => {
       throw new Error("Client configuration error");
     }
 
-    const lead = await resolveLead({
+    const customer = await resolveCustomer({
       clientId: clientRecord.id,
       phone: from,
     });
@@ -112,7 +111,7 @@ router.post("/sms", async (req, res) => {
     const inboundMessage = await prisma.message.create({
       data: {
         clientId: clientRecord.id,
-        customerId: lead.id,
+        customerId: customer.id,
         direction: "INBOUND",
         type: "SMS",
         body,
@@ -124,9 +123,9 @@ router.post("/sms", async (req, res) => {
       where: { clientId: clientRecord.id },
     });
 
-    const { replyMessage, updatedLead } = await handleInboundSms({
+    const { replyMessage } = await handleInboundSms({
       client: clientRecord,
-      lead,
+      customer,
       inboundMessage,
       clientSettings,
     });

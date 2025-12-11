@@ -1,15 +1,7 @@
 import { LLMClient } from "../../llm/LLMClient";
 import { Message } from "@prisma/client";
 
-export type IntentType =
-  | "GREETING"
-  | "QUESTION"
-  | "BOOKING_REQUEST"
-  | "JOB_DESCRIPTION"
-  | "URGENT_PROBLEM"
-  | "FOLLOW_UP"
-  | "CLOSING"
-  | "OTHER";
+export type IntentType = "NORMAL" | "URGENT" | "UNCLEAR" | "NON_LEAD";
 
 export interface ClassifyIntentParams {
   text: string;
@@ -24,14 +16,10 @@ export interface IntentClassificationResult {
 const SYSTEM_PROMPT = `You are an intent classification agent for a home services business SMS system.
 Your job is to classify customer messages into one of these intents:
 
-- GREETING: Initial hello, hi, or introduction messages
-- QUESTION: General questions about services, pricing, availability
-- BOOKING_REQUEST: Clear request to schedule or book an appointment
-- JOB_DESCRIPTION: Describing a specific job or problem that needs fixing
-- URGENT_PROBLEM: Emergency or time-sensitive issue
-- FOLLOW_UP: Following up on a previous conversation or booking
-- CLOSING: Thank you, goodbye, or conversation ending
-- OTHER: Anything that doesn't fit the above
+- NORMAL: Standard lead inquiry, job description, booking request, or general question about services. Customer is providing information about a job they need done.
+- URGENT: Emergency situation requiring immediate attention. Includes keywords like "emergency", "ASAP", "urgent", "right now", "flooding", "no heating", "lockout", "gas leak", or any safety/property damage risk.
+- UNCLEAR: Cannot determine what the customer wants. Message is too vague, incomplete, or confusing. Not enough information to understand the job or request.
+- NON_LEAD: Spam, sales pitches, wrong number, abusive messages, or clearly irrelevant content that has nothing to do with home services.
 
 Return a JSON object with:
 {
@@ -78,7 +66,7 @@ Classify the intent of the latest message.`;
   } catch (err) {
     console.error("DIAL: Failed to parse intent response:", err);
     return {
-      intent: "OTHER",
+      intent: "UNCLEAR",
       confidence: 0.3,
     };
   }

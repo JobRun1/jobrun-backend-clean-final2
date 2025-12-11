@@ -13,15 +13,15 @@ BEGIN
   END IF;
 END $$;
 
--- Create the named constraint
+-- Create the named constraint (skip if already exists)
 DO $$
 BEGIN
-  IF NOT EXISTS (
-    SELECT 1 FROM pg_constraint
-    WHERE conname = 'clientId_phone' AND conrelid = 'customers'::regclass
-  ) THEN
+  BEGIN
     ALTER TABLE customers ADD CONSTRAINT "clientId_phone" UNIQUE ("clientId", phone);
-  END IF;
+  EXCEPTION
+    WHEN duplicate_table THEN NULL;
+    WHEN duplicate_object THEN NULL;
+  END;
 END $$;
 
 -- Step 2: Rename Lead unique constraint
@@ -36,13 +36,13 @@ BEGIN
   END IF;
 END $$;
 
--- Create the named constraint
+-- Create the named constraint (skip if already exists)
 DO $$
 BEGIN
-  IF NOT EXISTS (
-    SELECT 1 FROM pg_constraint
-    WHERE conname = 'clientId_phone' AND conrelid = 'leads'::regclass
-  ) THEN
+  BEGIN
     ALTER TABLE leads ADD CONSTRAINT "clientId_phone" UNIQUE ("clientId", phone);
-  END IF;
+  EXCEPTION
+    WHEN duplicate_table THEN NULL;
+    WHEN duplicate_object THEN NULL;
+  END;
 END $$;

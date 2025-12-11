@@ -2,12 +2,12 @@ import { LLMClient } from "../../llm/LLMClient";
 import { Message } from "@prisma/client";
 import { IntentType } from "./dial";
 
-export type UrgencyLevel = "LOW" | "MEDIUM" | "HIGH";
-
 export interface ExtractedEntities {
   jobType?: string;
+  urgency?: string;
   location?: string;
-  urgency?: UrgencyLevel;
+  requestedTime?: string;
+  customerName?: string;
   extraDetails?: string;
 }
 
@@ -21,20 +21,21 @@ const SYSTEM_PROMPT = `You are an entity extraction agent for a home services bu
 Your job is to extract structured information from customer messages about jobs and requests.
 
 Extract the following fields when available:
-- jobType: Type of service needed (e.g., "plumbing", "electrical", "HVAC", "roofing", etc.)
-- location: Location information (address, city, area)
-- urgency: How urgent (LOW, MEDIUM, HIGH)
-  - HIGH: Emergency, immediate, ASAP, urgent problem
-  - MEDIUM: Soon, this week, need it done quickly
-  - LOW: No rush, scheduling for future, exploring options
-- extraDetails: Any other important context (problem description, special requirements, etc.)
+- jobType: Type of service needed (e.g., "plumbing", "electrical", "HVAC", "boiler repair", etc.)
+- urgency: Urgency description in plain language (e.g., "no heating", "water leak getting worse", "flooding", "lockout", "power out", "smoke/burning smell", "routine maintenance")
+- location: Location information (address, city, area, or property description)
+- requestedTime: When they want service (e.g., "tomorrow morning", "this afternoon", "next week", "ASAP")
+- customerName: Customer's name if mentioned
+- extraDetails: Any other important context (problem description, special requirements, access notes, etc.)
 
 Return a JSON object like:
 {
-  "jobType": "plumbing",
+  "jobType": "boiler repair",
+  "urgency": "no heating",
   "location": "123 Main St",
-  "urgency": "HIGH",
-  "extraDetails": "Burst pipe in basement, water everywhere"
+  "requestedTime": "tomorrow morning",
+  "customerName": "John Smith",
+  "extraDetails": "Boiler making strange noises before it stopped"
 }
 
 Only include fields that are explicitly mentioned or strongly implied. Omit fields if uncertain.`;
@@ -44,7 +45,8 @@ export async function extractEntities(
 ): Promise<ExtractedEntities> {
   const { text, context, intent } = params;
 
-  if (intent === "GREETING" || intent === "CLOSING") {
+  // Skip entity extraction for non-leads
+  if (intent === "NON_LEAD") {
     return {};
   }
 
@@ -77,8 +79,10 @@ Extract job-related entities from the message.`;
     const parsed = JSON.parse(response.content);
     return {
       jobType: parsed.jobType || undefined,
-      location: parsed.location || undefined,
       urgency: parsed.urgency || undefined,
+      location: parsed.location || undefined,
+      requestedTime: parsed.requestedTime || undefined,
+      customerName: parsed.customerName || undefined,
       extraDetails: parsed.extraDetails || undefined,
     };
   } catch (err) {

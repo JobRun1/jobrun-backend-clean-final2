@@ -2,7 +2,7 @@
 // JOBRUN DASHBOARD API CLIENT
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:3000";
+const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:3001";
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // TYPES
@@ -325,4 +325,35 @@ export async function updateClientSettings(
       body: JSON.stringify(settings),
     }
   );
+}
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// DEMO DATA API
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+export interface GenerateDemoResponse {
+  clientId: string;
+  clientName: string;
+  numberOfLeads: number;
+  numberOfMessages: number;
+  numberOfBookings: number;
+}
+
+export interface WipeDemoResponse {
+  deletedClients: number;
+  deletedCustomers: number;
+  deletedMessages: number;
+  deletedBookings: number;
+}
+
+export async function generateDemoData(): Promise<GenerateDemoResponse> {
+  return fetchAPI<GenerateDemoResponse>("/api/admin/demo/generate", {
+    method: "POST",
+  });
+}
+
+export async function wipeDemoData(): Promise<WipeDemoResponse> {
+  return fetchAPI<WipeDemoResponse>("/api/admin/demo/wipe", {
+    method: "DELETE",
+  });
 }
