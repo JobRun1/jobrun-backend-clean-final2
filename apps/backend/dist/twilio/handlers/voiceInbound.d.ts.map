@@ -1,1 +1,0 @@
-{"version":3,"file":"voiceInbound.d.ts","sourceRoot":"","sources":["../../../src/twilio/handlers/voiceInbound.ts"],"names":[],"mappings":"AAAA,OAAO,EAAE,OAAO,EAAE,QAAQ,EAAE,MAAM,SAAS,CAAC;AAO5C;;GAEG;AACH,wBAAsB,kBAAkB,CAAC,GAAG,EAAE,OAAO,EAAE,GAAG,EAAE,QAAQ,GAAG,OAAO,CAAC,IAAI,CAAC,CAoDnF"}
