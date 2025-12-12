@@ -6,10 +6,8 @@
  * - Existing bookings (Phase 3)
  */
 
-import { PrismaClient } from '@prisma/client';
+import { prisma } from '../db';
 import { TimeWindow } from './TimeParser';
-
-const prisma = new PrismaClient();
 
 export interface SlotRequest {
   clientId: string;

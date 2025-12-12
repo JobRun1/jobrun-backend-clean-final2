@@ -42,6 +42,7 @@ console.log("══════════════════════�
 import express from "express";
 import cors from "cors";
 import http from "http";
+import { prisma } from "./db";
 import twilioRoutes from "./routes/twilio";
 import adminRoutes from "./routes/admin";
 import adminDemoRoutes from "./routes/admin-demo";
@@ -66,8 +67,58 @@ function validateEnv() {
 
   if (missing.length > 0) {
     console.error("❌ Missing required environment variables:", missing);
-  } else {
-    console.log("✅ All required environment variables present");
+    process.exit(1);
+  }
+
+  console.log("✅ All required environment variables present");
+}
+
+// Validate default client exists in database
+async function validateDefaultClient() {
+  const defaultClientId = process.env.DEFAULT_CLIENT_ID!;
+
+  console.log("🔍 Validating default client:", defaultClientId);
+
+  try {
+    const client = await prisma.client.findUnique({
+      where: { id: defaultClientId },
+    });
+
+    if (!client) {
+      console.error("❌ FATAL: Default client not found in database");
+      console.error(`   Expected client ID: ${defaultClientId}`);
+      console.error("   Run SQL fix from deployment docs to create client");
+      process.exit(1);
+    }
+
+    const clientSettings = await prisma.clientSettings.findUnique({
+      where: { clientId: defaultClientId },
+    });
+
+    if (!clientSettings) {
+      console.error("❌ FATAL: ClientSettings not found for default client");
+      console.error(`   Client ID: ${defaultClientId}`);
+      console.error("   Run SQL fix from deployment docs to create settings");
+      process.exit(1);
+    }
+
+    const metadata = clientSettings.metadata as Record<string, unknown> | null;
+    const bookingUrl = metadata?.bookingUrl;
+
+    if (!bookingUrl || typeof bookingUrl !== "string") {
+      console.error("❌ FATAL: ClientSettings.metadata.bookingUrl is missing");
+      console.error(`   Client ID: ${defaultClientId}`);
+      console.error("   Run SQL fix to set bookingUrl in metadata");
+      process.exit(1);
+    }
+
+    console.log("✅ Default client validated:");
+    console.log(`   ID: ${client.id}`);
+    console.log(`   Business: ${client.businessName}`);
+    console.log(`   Booking URL: ${bookingUrl}`);
+  } catch (error) {
+    console.error("❌ FATAL: Failed to validate default client:", error);
+    process.exit(1);
   }
 }
 
@@ -117,6 +168,7 @@ export function createServer() {
 
 async function start() {
   validateEnv();
+  await validateDefaultClient();
 
   const app = createServer();
   const server = http.createServer(app);

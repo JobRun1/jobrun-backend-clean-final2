@@ -18,19 +18,11 @@ router.get('/', async (req, res) => {
       select: {
         id: true,
         businessName: true,
-        phone: true,
+        phoneNumber: true,
         twilioNumber: true,
         region: true,
         timezone: true,
-        operatingHours: true,
-        emailAlerts: true,
-        smsAlerts: true,
-        dailySummary: true,
-        aiTone: true,
-        aiResponseLength: true,
-        aiBookingStyle: true,
-        defaultJobDuration: true,
-        allowSameDayBookings: true,
+        businessHours: true,
       },
     });
 
@@ -42,31 +34,34 @@ router.get('/', async (req, res) => {
     if (tab === 'business') {
       sendSuccess(res, {
         businessName: client.businessName,
-        phone: client.phone,
+        phone: client.phoneNumber,
         twilioNumber: client.twilioNumber,
         region: client.region || 'US',
         timezone: client.timezone,
       });
     } else if (tab === 'hours') {
       sendSuccess(res, {
-        operatingHours: client.operatingHours || getDefaultOperatingHours(),
+        operatingHours: client.businessHours || getDefaultOperatingHours(),
       });
     } else if (tab === 'notifications') {
+      // These fields don't exist on Client model - return defaults
       sendSuccess(res, {
-        emailAlerts: client.emailAlerts ?? true,
-        smsAlerts: client.smsAlerts ?? false,
-        dailySummary: client.dailySummary ?? true,
+        emailAlerts: true,
+        smsAlerts: false,
+        dailySummary: true,
       });
     } else if (tab === 'assistant') {
+      // These fields don't exist on Client model - return defaults
       sendSuccess(res, {
-        aiTone: client.aiTone || 'friendly',
-        aiResponseLength: client.aiResponseLength || 'medium',
-        aiBookingStyle: client.aiBookingStyle || 'conversational',
+        aiTone: 'friendly',
+        aiResponseLength: 'medium',
+        aiBookingStyle: 'conversational',
       });
     } else if (tab === 'booking') {
+      // These fields don't exist on Client model - return defaults
       sendSuccess(res, {
-        defaultJobDuration: client.defaultJobDuration || 60,
-        allowSameDayBookings: client.allowSameDayBookings ?? true,
+        defaultJobDuration: 60,
+        allowSameDayBookings: true,
       });
     } else {
       return sendError(res, 'INVALID_TAB', 'Invalid settings tab', 400);
@@ -100,23 +95,23 @@ router.put('/', async (req, res) => {
       const { businessName, phone, twilioNumber, region, timezone } = req.body;
       updateData = {
         businessName,
-        phone,
+        phoneNumber: phone,
         twilioNumber,
         region,
         timezone,
       };
     } else if (tab === 'hours') {
       const { operatingHours } = req.body;
-      updateData = { operatingHours };
+      updateData = { businessHours: operatingHours };
     } else if (tab === 'notifications') {
-      const { emailAlerts, smsAlerts, dailySummary } = req.body;
-      updateData = { emailAlerts, smsAlerts, dailySummary };
+      // These fields don't exist on Client model - skip update
+      updateData = {};
     } else if (tab === 'assistant') {
-      const { aiTone, aiResponseLength, aiBookingStyle } = req.body;
-      updateData = { aiTone, aiResponseLength, aiBookingStyle };
+      // These fields don't exist on Client model - skip update
+      updateData = {};
     } else if (tab === 'booking') {
-      const { defaultJobDuration, allowSameDayBookings } = req.body;
-      updateData = { defaultJobDuration, allowSameDayBookings };
+      // These fields don't exist on Client model - skip update
+      updateData = {};
     } else {
       return sendError(res, 'INVALID_TAB', 'Invalid settings tab', 400);
     }

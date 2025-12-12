@@ -21,6 +21,7 @@ export interface SentinelGuardResult {
   allowed: boolean;
   category: string;
   reason: string;
+  allowOverride?: boolean;
 }
 
 const SYSTEM_PROMPT = `You are SENTINEL — the safety and security layer for JobRun.
@@ -253,4 +254,92 @@ export async function runSentinelGuard(
       reason: "safety check error",
     };
   }
+}
+
+/**
+ * Outbound-specific whitelist rules for SENTINEL
+ */
+function checkOutboundWhitelist(messageText: string): { matched: boolean; reason: string } {
+  const lowerText = messageText.toLowerCase();
+
+  // Rule 1: Contains HTTPS URL (booking links, etc.)
+  if (messageText.includes("https://")) {
+    return { matched: true, reason: "contains https URL" };
+  }
+
+  // Rule 2: Contains safe business phrases
+  const safeBusinessPhrases = [
+    "book",
+    "booking",
+    "schedule",
+    "appointment",
+    "help you",
+    "thanks for reaching out",
+    "thanks for getting in touch",
+    "thanks for your message",
+    "we can help",
+    "please book",
+  ];
+
+  for (const phrase of safeBusinessPhrases) {
+    if (lowerText.includes(phrase)) {
+      return { matched: true, reason: `contains safe phrase: "${phrase}"` };
+    }
+  }
+
+  // Rule 3: Check for unsafe patterns (should NOT whitelist if present)
+  const unsafePatterns = [
+    /<script/i,
+    /javascript:/i,
+    /on\w+\s*=/i, // event handlers like onclick=
+    /\$\{.*\}/,  // template injection
+  ];
+
+  for (const pattern of unsafePatterns) {
+    if (pattern.test(messageText)) {
+      return { matched: false, reason: "contains unsafe pattern" };
+    }
+  }
+
+  return { matched: false, reason: "no whitelist rule matched" };
+}
+
+/**
+ * Run SENTINEL guard specifically for outbound messages with whitelist support
+ */
+export async function runOutboundSentinelGuard(
+  params: SentinelGuardParams
+): Promise<SentinelGuardResult> {
+  const { messageText } = params;
+
+  console.log("🔍 SENTINEL OUTBOUND CHECK: original reply:", messageText);
+
+  // Check whitelist first
+  const whitelistCheck = checkOutboundWhitelist(messageText);
+
+  if (whitelistCheck.matched) {
+    console.log("✅ Whitelist matched:", whitelistCheck.reason);
+    return {
+      allowed: true,
+      category: "WHITELIST",
+      reason: whitelistCheck.reason,
+      allowOverride: true,
+    };
+  }
+
+  console.log("⚠️ Whitelist not matched:", whitelistCheck.reason);
+
+  // If whitelist doesn't match, run standard SENTINEL
+  // But ONLY block for explicit SCAM/SPAM/ABUSIVE categories
+  const standardResult = await runSentinelGuard(params);
+
+  // For outbound, only block if it's explicitly dangerous
+  const dangerousCategories = ["SCAM", "SPAM", "ABUSIVE", "INJECTION"];
+
+  if (!standardResult.allowed && !dangerousCategories.includes(standardResult.category)) {
+    console.log(`⚠️ Overriding SENTINEL block for non-dangerous category: ${standardResult.category}`);
+    return { allowed: true, category: "SAFE", reason: "non-dangerous override" };
+  }
+
+  return standardResult;
 }

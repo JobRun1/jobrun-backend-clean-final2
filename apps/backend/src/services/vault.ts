@@ -5,10 +5,9 @@
  * Manages lead state, memory flags, and conversation history.
  */
 
-import { PrismaClient, Lead, LeadState, Customer } from "@prisma/client";
+import { Lead, LeadState, Customer } from "@prisma/client";
+import { prisma } from "../db";
 import { ExtractedEntities } from "../ai/utils/flow";
-
-const prisma = new PrismaClient();
 
 export interface CreateLeadParams {
   clientId: string;

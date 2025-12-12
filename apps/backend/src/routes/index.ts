@@ -14,7 +14,6 @@ import agentsRouter from './agents';
 import settingsRouter from './settings';
 import analyticsRouter from './analytics';
 import leadsRouter from './leads';
-import fakeDataRouter from './fakeData';
 import demoModeRouter from './demoMode';
 import availabilityRouter from './availability';
 import blockedTimesRouter from './blockedTimes';
@@ -48,7 +47,6 @@ router.use('/agents', agentsRouter);
 router.use('/settings', settingsRouter);
 router.use('/analytics', analyticsRouter);
 router.use('/leads', leadsRouter);
-router.use('/fake-data', fakeDataRouter);
 router.use('/demo-mode', demoModeRouter);
 
 // Calendar Phase 2 routes

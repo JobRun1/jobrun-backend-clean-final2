@@ -1,6 +1,5 @@
-import { PrismaClient, Lead, Message } from "@prisma/client";
-
-const prisma = new PrismaClient();
+import { Lead, Message } from "@prisma/client";
+import { prisma } from "../../db";
 
 export interface LeadContext {
   lead: Lead;

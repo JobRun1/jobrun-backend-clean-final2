@@ -10,6 +10,19 @@ export async function findOrCreateConversation(
   customerId: string
 ): Promise<Conversation> {
   try {
+    if (!customerId) {
+      throw new Error('customerId is required for conversation');
+    }
+
+    const customerExists = await prisma.customer.findUnique({
+      where: { id: customerId },
+      select: { id: true },
+    });
+
+    if (!customerExists) {
+      throw new Error(`Customer ${customerId} does not exist`);
+    }
+
     // Find the most recent conversation for this customer
     let conversation = await prisma.conversation.findFirst({
       where: {
@@ -47,6 +60,10 @@ export async function findOrCreateConversation(
 
 /**
  * Add a message to a conversation
+ * INVARIANTS ENFORCED:
+ * - Conversation must exist
+ * - Conversation must belong to the specified client
+ * - If customerId provided, conversation must belong to that customer
  */
 export async function addMessage(params: {
   conversationId: string;
@@ -59,11 +76,36 @@ export async function addMessage(params: {
   metadata?: any;
 }): Promise<Message> {
   try {
+    // CRITICAL: Verify conversation exists and matches ALL provided IDs
+    const conversation = await prisma.conversation.findUnique({
+      where: { id: params.conversationId },
+      select: { id: true, clientId: true, customerId: true },
+    });
+
+    if (!conversation) {
+      throw new Error(`Conversation ${params.conversationId} does not exist`);
+    }
+
+    if (conversation.clientId !== params.clientId) {
+      throw new Error(
+        `Conversation ${params.conversationId} belongs to client ${conversation.clientId}, not ${params.clientId}`
+      );
+    }
+
+    if (params.customerId && conversation.customerId !== params.customerId) {
+      throw new Error(
+        `Conversation ${params.conversationId} belongs to customer ${conversation.customerId}, not ${params.customerId}`
+      );
+    }
+
+    // Use conversation's customerId as the source of truth
+    const messageCustomerId = params.customerId || conversation.customerId;
+
     const message = await prisma.message.create({
       data: {
         conversationId: params.conversationId,
         clientId: params.clientId,
-        customerId: params.customerId,
+        customerId: messageCustomerId,
         direction: params.direction,
         type: params.type,
         body: params.body,
@@ -81,6 +123,7 @@ export async function addMessage(params: {
     logger.info('Added message to conversation', {
       messageId: message.id,
       conversationId: params.conversationId,
+      customerId: messageCustomerId,
       direction: params.direction,
       type: params.type,
     });

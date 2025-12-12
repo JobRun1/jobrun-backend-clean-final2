@@ -1,5 +1,6 @@
-import { PrismaClient, Client, Customer, Lead, Message, ClientSettings } from "@prisma/client";
-import { runSentinelGuard } from "../utils/sentinel";
+import { Client, Customer, Lead, Message, ClientSettings } from "@prisma/client";
+import { prisma } from "../../db";
+import { runSentinelGuard, runOutboundSentinelGuard } from "../utils/sentinel";
 import { classifyIntent } from "../utils/dial";
 import { extractEntities } from "../utils/flow";
 import { decideAction, RuneInput } from "../../services/rune";
@@ -15,8 +16,6 @@ import {
   markClarificationAsked,
   markEscalated,
 } from "../../services/vault";
-
-const prisma = new PrismaClient();
 
 export interface HandleInboundSmsParams {
   client: Client;
@@ -54,16 +53,15 @@ export async function handleInboundSms(
 
       await logAiEvent({
         clientId: client.id,
-        leadId: customer.id,
+        customerId: customer.id,
         direction: "SYSTEM",
         type: "EVENT",
         content: `SENTINEL blocked message: ${sentinelResult.reason}`,
         metadata: { reason: sentinelResult.reason, originalMessage: inboundMessage.body },
-      });
+      }).catch(() => {}); // Best effort logging
 
-      return {
-        replyMessage: "Sorry, I'm having trouble processing your message. Someone from the team will get back to you shortly.",
-      };
+      // CRITICAL: Throw to trigger HTTP 500 and Twilio retry
+      throw new Error(`Inbound message blocked by safety guard: ${sentinelResult.reason}`);
     }
     console.log("✅ SENTINEL: Message passed safety checks");
 
@@ -199,35 +197,52 @@ export async function handleInboundSms(
       console.log(`✅ LYRA: Generated reply (${replyMessage.length} chars)`);
       console.log(`   Reply: "${replyMessage}"`);
 
+      // Check for LYRA parse error
+      if (replyMessage === "__LYRA_PARSE_ERROR__") {
+        console.error("❌ LYRA parse error detected");
+
+        await logAiEvent({
+          clientId: client.id,
+          customerId: lead.customerId,
+          direction: "SYSTEM",
+          type: "EVENT",
+          content: "LYRA parse error",
+          metadata: { action: decision.action, leadId: lead.id },
+        }).catch(() => {}); // Best effort logging
+
+        // CRITICAL: Throw to trigger HTTP 500 and Twilio retry
+        throw new Error("LYRA failed to generate valid response");
+      }
+
       console.log("8️⃣ SENTINEL: Final safety check on outbound...");
-      const outboundGuard = await runSentinelGuard({
+      const outboundGuard = await runOutboundSentinelGuard({
         clientId: client.id,
         lead: customer as any, // SENTINEL still expects old format
         messageText: replyMessage,
       });
 
       if (!outboundGuard.allowed) {
-        console.warn(`⚠️ SENTINEL BLOCKED OUTBOUND: ${outboundGuard.reason}`);
+        console.warn(`⚠️ SENTINEL BLOCKED OUTBOUND: ${outboundGuard.category} - ${outboundGuard.reason}`);
+        console.warn(`⚠️ BLOCKED MESSAGE: "${replyMessage}"`);
 
         await logAiEvent({
           clientId: client.id,
-          leadId: lead.id,
+          customerId: lead.customerId,
           direction: "SYSTEM",
           type: "EVENT",
           content: `SENTINEL blocked outbound: ${outboundGuard.reason}`,
-          metadata: { reason: outboundGuard.reason, blockedReply: replyMessage },
-        });
+          metadata: { reason: outboundGuard.reason, category: outboundGuard.category, blockedReply: replyMessage, leadId: lead.id },
+        }).catch(() => {}); // Best effort logging
 
-        return {
-          replyMessage: "Thank you for your message. Someone from the team will get back to you shortly.",
-        };
+        // CRITICAL: Throw to trigger HTTP 500 and Twilio retry
+        throw new Error(`Outbound message blocked by safety guard: ${outboundGuard.reason}`);
       }
-      console.log("✅ SENTINEL: Outbound message passed checks");
+      console.log(`✅ SENTINEL: Outbound message passed checks (${outboundGuard.category})`);
 
       console.log("9️⃣ LOGGER: Recording outbound message...");
       await logAiEvent({
         clientId: client.id,
-        leadId: lead.id,
+        customerId: lead.customerId,
         direction: "OUTBOUND",
         type: "SMS",
         content: replyMessage,
@@ -235,9 +250,12 @@ export async function handleInboundSms(
           intent: intentResult.intent,
           action: decision.action,
           entities,
+          sentinelCategory: outboundGuard.category,
+          leadId: lead.id,
         },
       });
       console.log("✅ LOGGER: Outbound message logged");
+      console.log("📤 FINAL SMS BODY:", replyMessage);
     } else {
       console.log("✅ LYRA: No reply needed (action = NO_REPLY)");
     }
@@ -255,15 +273,15 @@ export async function handleInboundSms(
 
     await logAiEvent({
       clientId: client.id,
-      leadId: customer.id,
+      customerId: customer.id,
       direction: "SYSTEM",
       type: "EVENT",
       content: `Pipeline error: ${error instanceof Error ? error.message : "Unknown error"}`,
       metadata: { error: String(error) },
-    });
+    }).catch(() => {}); // Best effort logging
 
-    return {
-      replyMessage: "Sorry, I'm having trouble right now. Someone from the team will get back to you shortly.",
-    };
+    // CRITICAL: Re-throw to trigger HTTP 500 and Twilio retry
+    // Do NOT return fallback text
+    throw error;
   }
 }

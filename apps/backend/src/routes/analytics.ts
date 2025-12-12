@@ -1,8 +1,6 @@
 import { Router } from "express";
-import { PrismaClient } from "@prisma/client";
+import { prisma } from "../db";
 import { authenticate } from "../middleware/auth";
-
-const prisma = new PrismaClient();
 const router = Router();
 
 // Get analytics for the logged-in client

@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { prisma } from '../db';
 import { sendSuccess, sendError } from '../utils/response';
+import { findOrCreateConversation, addMessage } from '../modules/conversation/service';
 
 const router = Router();
 
@@ -233,19 +234,17 @@ router.post('/:id/messages/send', async (req, res) => {
       return sendError(res, 'NOT_FOUND', 'Lead not found', 404);
     }
 
-    const message = await prisma.message.create({
-      data: {
-        clientId,
-        customerId: id,
-        direction: 'OUTBOUND',
-        type: type || 'SMS',
-        body: body.trim(),
-      },
-    });
+    // Find or create conversation BEFORE creating message
+    const conversation = await findOrCreateConversation(clientId, id);
 
-    await prisma.customer.update({
-      where: { id },
-      data: { updatedAt: new Date() },
+    // Create message through conversation service
+    const message = await addMessage({
+      conversationId: conversation.id,
+      clientId,
+      customerId: id,
+      direction: 'OUTBOUND',
+      type: type || 'SMS',
+      body: body.trim(),
     });
 
     const formattedMessage = {

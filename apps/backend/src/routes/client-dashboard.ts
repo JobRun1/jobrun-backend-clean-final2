@@ -112,7 +112,7 @@ router.get('/recent-messages', async (req, res) => {
     const formatted = messages.map((msg) => ({
       id: msg.id,
       leadId: msg.customerId,
-      leadName: msg.customer.name || 'Unknown',
+      leadName: msg.customer?.name || 'Unknown',
       body: msg.body,
       direction: msg.direction === 'SYSTEM' ? 'AI' : msg.direction,
       createdAt: msg.createdAt.toISOString(),
@@ -181,7 +181,7 @@ router.get('/activity', async (req, res) => {
         activity.push({
           id: `msg-${msg.id}`,
           type: 'MESSAGE',
-          title: `Message from ${msg.customer.name || 'Unknown'}`,
+          title: `Message from ${msg.customer?.name || 'Unknown'}`,
           description: msg.body.substring(0, 60) + (msg.body.length > 60 ? '...' : ''),
           timestamp: msg.createdAt.toISOString(),
           leadId: msg.customerId,
@@ -190,7 +190,7 @@ router.get('/activity', async (req, res) => {
         activity.push({
           id: `ai-${msg.id}`,
           type: 'AI_ACTION',
-          title: `AI responded to ${msg.customer.name || 'Unknown'}`,
+          title: `AI responded to ${msg.customer?.name || 'Unknown'}`,
           description: msg.body.substring(0, 60) + (msg.body.length > 60 ? '...' : ''),
           timestamp: msg.createdAt.toISOString(),
           leadId: msg.customerId,
@@ -203,8 +203,8 @@ router.get('/activity', async (req, res) => {
       activity.push({
         id: `booking-${booking.id}`,
         type: 'BOOKING',
-        title: `New booking from ${booking.customer.name || 'Unknown'}`,
-        description: `Scheduled for ${new Date(booking.scheduledAt).toLocaleDateString()}`,
+        title: `New booking from ${booking.customer?.name || 'Unknown'}`,
+        description: `Scheduled for ${new Date(booking.start).toLocaleDateString()}`,
         timestamp: booking.createdAt.toISOString(),
         leadId: booking.customerId,
       });

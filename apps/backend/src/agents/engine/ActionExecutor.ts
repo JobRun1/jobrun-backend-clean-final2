@@ -4,6 +4,7 @@
 
 import { PrismaClient } from '@prisma/client';
 import type { AgentAction, AgentContext } from '../base/types';
+import { addMessage } from '../../modules/conversation/service';
 
 export class ActionExecutor {
   private prisma: PrismaClient;
@@ -113,15 +114,22 @@ export class ActionExecutor {
   private async executeSendMessage(action: AgentAction, context: AgentContext) {
     const { message, to } = action.payload;
 
-    const result = await this.prisma.message.create({
-      data: {
-        clientId: context.clientId,
-        conversationId: context.conversationId,
-        customerId: context.customerId,
-        direction: 'OUTBOUND',
-        type: 'SMS',
-        body: message,
-      },
+    if (!context.conversationId) {
+      throw new Error('conversationId is required to send message');
+    }
+
+    if (!context.customerId) {
+      throw new Error('customerId is required to send message');
+    }
+
+    // Use conversation service to ensure foreign key constraints
+    const result = await addMessage({
+      conversationId: context.conversationId,
+      clientId: context.clientId,
+      customerId: context.customerId,
+      direction: 'OUTBOUND',
+      type: 'SMS',
+      body: message,
     });
 
     return { success: true, result };
@@ -130,10 +138,25 @@ export class ActionExecutor {
   private async executeCreateBooking(action: AgentAction, context: AgentContext) {
     const { customerId, serviceType, startTime, endTime, notes } = action.payload;
 
+    const targetCustomerId = customerId || context.customerId;
+
+    if (!targetCustomerId) {
+      throw new Error('customerId is required for booking');
+    }
+
+    const customerExists = await this.prisma.customer.findUnique({
+      where: { id: targetCustomerId },
+      select: { id: true },
+    });
+
+    if (!customerExists) {
+      throw new Error(`Customer ${targetCustomerId} does not exist`);
+    }
+
     const result = await this.prisma.booking.create({
       data: {
         clientId: context.clientId,
-        customerId: customerId || context.customerId!,
+        customerId: targetCustomerId,
         start: new Date(startTime),
         end: new Date(endTime),
         status: 'NEW',
@@ -189,8 +212,14 @@ export class ActionExecutor {
   private async executeUpdateCustomer(action: AgentAction, context: AgentContext) {
     const { customerId, updates } = action.payload;
 
+    const targetCustomerId = customerId || context.customerId;
+
+    if (!targetCustomerId) {
+      throw new Error('customerId is required for customer update');
+    }
+
     const result = await this.prisma.customer.update({
-      where: { id: customerId || context.customerId! },
+      where: { id: targetCustomerId },
       data: updates,
     });
 
@@ -198,16 +227,36 @@ export class ActionExecutor {
   }
 
   private async executeCreateLead(action: AgentAction, context: AgentContext) {
-    const { phone, name, source, notes } = action.payload;
+    const { phone, name, notes } = action.payload;
 
+    // Create or find customer first (Lead requires customerId)
+    const customer = await this.prisma.customer.upsert({
+      where: {
+        clientId_phone: {
+          clientId: context.clientId,
+          phone: phone || 'unknown',
+        },
+      },
+      update: name ? { name } : {},
+      create: {
+        clientId: context.clientId,
+        phone: phone || 'unknown',
+        name: name || null,
+        state: 'NEW',
+      },
+    });
+
+    // Then create lead linked to customer
     const result = await this.prisma.lead.create({
       data: {
         clientId: context.clientId,
-        phone,
-        name,
-        source: source || 'INBOUND',
-        status: 'NEW',
-        notes,
+        customerId: customer.id,
+        state: 'NEW',
+        jobType: '',
+        urgency: '',
+        location: '',
+        requestedTime: '',
+        notes: notes || '',
       },
     });
 

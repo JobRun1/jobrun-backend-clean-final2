@@ -12,7 +12,8 @@
     "start": "node dist/index.js",
     "db:push": "prisma db push",
     "db:pull": "prisma db pull",
-    "seed": "ts-node -r tsconfig-paths/register scripts/seed.ts"
+    "seed": "ts-node -r tsconfig-paths/register prisma/seed.ts",
+    "seed:prod": "ts-node -r tsconfig-paths/register prisma/seed-production.ts"
   },
   "prisma": {
     "seed": "ts-node -r tsconfig-paths/register scripts/seed.ts"

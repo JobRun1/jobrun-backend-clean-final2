@@ -1,7 +1,6 @@
-import { PrismaClient, BookingStatus } from "@prisma/client";
+import { BookingStatus } from "@prisma/client";
+import { prisma } from "../../db";
 import { RecurrenceEngine } from "./RecurrenceEngine";
-
-const prisma = new PrismaClient();
 
 export interface OverlappingBooking {
   id: string;

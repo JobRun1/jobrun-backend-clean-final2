@@ -1,6 +1,5 @@
-import { PrismaClient, Customer } from "@prisma/client";
-
-const prisma = new PrismaClient();
+import { Customer } from "@prisma/client";
+import { prisma } from "../db";
 
 export interface ResolveCustomerParams {
   clientId: string;
@@ -13,36 +12,23 @@ export async function resolveCustomer(params: ResolveCustomerParams): Promise<Cu
 
   const normalizedPhone = phone.trim();
 
-  let customer = await prisma.customer.findUnique({
+  const customer = await prisma.customer.upsert({
     where: {
       clientId_phone: {
         clientId,
         phone: normalizedPhone,
       },
     },
+    update: name && name.trim() ? { name: name.trim() } : {},
+    create: {
+      clientId,
+      phone: normalizedPhone,
+      name: name?.trim() || null,
+      state: "NEW",
+    },
   });
 
-  if (!customer) {
-    console.log(`📝 Creating new customer for ${normalizedPhone}`);
-    customer = await prisma.customer.create({
-      data: {
-        clientId,
-        phone: normalizedPhone,
-        name: name || null,
-        state: "NEW",
-      },
-    });
-  } else {
-    console.log(`✅ Found existing customer: ${customer.id} (${customer.state})`);
-
-    if (name && !customer.name) {
-      customer = await prisma.customer.update({
-        where: { id: customer.id },
-        data: { name },
-      });
-      console.log(`📝 Updated customer name to: ${name}`);
-    }
-  }
+  console.log(`✅ Resolved customer: ${customer.id} (${customer.state})`);
 
   return customer;
 }

@@ -1,10 +1,8 @@
 import { Router } from "express";
-import { PrismaClient } from "@prisma/client";
+import { prisma } from "../db";
 import { authenticate } from "../middleware/auth";
 import { AuthenticatedRequest } from "../types/express";
 import { Response } from "express";
-
-const prisma = new PrismaClient();
 const router = Router();
 
 // POST /api/demo-mode/toggle

@@ -1,0 +1,110 @@
+diff --git a/apps/backend/src/ai/utils/lyra.ts b/apps/backend/src/ai/utils/lyra.ts
+index 2c1aabc..7f9e999 100644
+--- a/apps/backend/src/ai/utils/lyra.ts
++++ b/apps/backend/src/ai/utils/lyra.ts
+@@ -36,7 +36,7 @@ interface LyraInput {
+ }
+
+ interface LyraOutput {
+-  message: string;
++  reply: string;
+ }
+
+ function getBookingUrl(clientSettings: ClientSettings | null): string | null {
+@@
+ export async function generateReply(
+   params: GenerateReplyParams
+ ): Promise<string> {
++  console.log("🧠 LYRA invoked with action:", params.action);
+
+   const response = await llm.generate({
+     model: "gpt-4o-mini",
+@@
+-  try {
+-    const parsed: LyraOutput = JSON.parse(response.content);
+-    return parsed.message.trim();
+-  } catch {
+-    return "Thanks for your message. Someone from the team will get back to you shortly.";
+-  }
++  const raw = response.content;
++  console.log("🔍 LYRA raw response:", raw);
++
++  let parsed: any = null;
++
++  try {
++    parsed = JSON.parse(raw);
++  } catch {}
++
++  if (!parsed || typeof parsed.reply !== "string" || parsed.reply.trim() === "") {
++    console.error("❌ LYRA JSON PARSE FAILURE");
++    return "__LYRA_PARSE_ERROR__";
++  }
++
++  return parsed.reply.trim();
+ }
+diff --git a/apps/backend/src/ai/utils/sentinel.ts b/apps/backend/src/ai/utils/sentinel.ts
+index a19f111..b88c222 100644
+--- a/apps/backend/src/ai/utils/sentinel.ts
++++ b/apps/backend/src/ai/utils/sentinel.ts
+@@
+ export interface SentinelGuardResult {
+   allowed: boolean;
+   category: string;
+   reason: string;
++  allowOverride?: boolean;
+ }
++
++function outboundWhitelist(message: string): boolean {
++  if (message.includes("https://")) return true;
++
++  const safe = [
++    "book",
++    "booking",
++    "schedule",
++    "appointment",
++    "thanks for",
++    "help you",
++  ];
++
++  return safe.some(p => message.toLowerCase().includes(p));
++}
++
++export async function runOutboundSentinelGuard(params: SentinelGuardParams) {
++  if (outboundWhitelist(params.messageText)) {
++    return {
++      allowed: true,
++      category: "WHITELIST",
++      reason: "outbound business message",
++      allowOverride: true,
++    };
++  }
++
++  const result = await runSentinelGuard(params);
++
++  if (!result.allowed && !["SCAM","SPAM","ABUSIVE","INJECTION"].includes(result.category)) {
++    return { allowed: true, category: "OVERRIDDEN", reason: "non-dangerous" };
++  }
++
++  return result;
++}
+diff --git a/apps/backend/src/ai/pipelines/inboundSmsPipeline.ts b/apps/backend/src/ai/pipelines/inboundSmsPipeline.ts
+index e921aaa..c44d333 100644
+--- a/apps/backend/src/ai/pipelines/inboundSmsPipeline.ts
++++ b/apps/backend/src/ai/pipelines/inboundSmsPipeline.ts
+@@
+-import { runSentinelGuard } from "../utils/sentinel";
++import { runSentinelGuard, runOutboundSentinelGuard } from "../utils/sentinel";
+@@
+       if (replyMessage === "__LYRA_PARSE_ERROR__") {
+         console.error("❌ LYRA failed — fallback used");
+         return {
+           replyMessage: "Thanks for your message. Someone from the team will get back to you shortly.",
+         };
+       }
+@@
+-      const outboundGuard = await runSentinelGuard({
++      const outboundGuard = await runOutboundSentinelGuard({
+         clientId: client.id,
+         lead: customer as any,
+         messageText: replyMessage,
+       });

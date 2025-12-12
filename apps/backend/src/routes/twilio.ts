@@ -3,6 +3,7 @@ import twilio from "twilio";
 import { prisma } from "../db";
 import { resolveCustomer } from "../utils/resolveCustomer";
 import { handleInboundSms } from "../ai/pipelines/inboundSmsPipeline";
+import { findOrCreateConversation, addMessage } from "../modules/conversation/service";
 
 const router = Router();
 
@@ -25,7 +26,7 @@ router.post("/voice", async (req, res) => {
   const twiml = `
     <Response>
       <Say voice="Polly.Joanna">
-        Hello! This is the JobRun automated assistant. 
+        Hello! This is the JobRun automated assistant.
         Thanks for calling — once your call ends, you'll receive a confirmation text.
       </Say>
       <Hangup/>
@@ -99,8 +100,12 @@ router.post("/sms", async (req, res) => {
     });
 
     if (!clientRecord) {
-      console.error("❌ Default client not found:", defaultClientId);
-      throw new Error("Client configuration error");
+      console.error("❌ CRITICAL: Default client not found in database");
+      console.error(`   DEFAULT_CLIENT_ID: ${defaultClientId}`);
+      console.error("   This should have been caught at startup");
+      console.error("   Check Railway env vars match database");
+      // Return 500 to trigger Twilio retry
+      return res.status(500).send("Server configuration error");
     }
 
     const customer = await resolveCustomer({
@@ -108,20 +113,42 @@ router.post("/sms", async (req, res) => {
       phone: from,
     });
 
-    const inboundMessage = await prisma.message.create({
-      data: {
-        clientId: clientRecord.id,
-        customerId: customer.id,
-        direction: "INBOUND",
-        type: "SMS",
-        body,
-        twilioSid: messageSid,
-      },
+    if (!customer || !customer.id) {
+      console.error("❌ CRITICAL: Customer resolution failed - no valid id");
+      // Return 500 to trigger Twilio retry
+      return res.status(500).send("Customer resolution failed");
+    }
+
+    // Find or create conversation BEFORE creating message
+    const conversation = await findOrCreateConversation(
+      clientRecord.id,
+      customer.id
+    );
+
+    // CRITICAL: Create message through conversation service with validation
+    // This will throw if conversation doesn't belong to customer (prevents FK violation)
+    const inboundMessage = await addMessage({
+      conversationId: conversation.id,
+      clientId: clientRecord.id,
+      customerId: customer.id,
+      direction: "INBOUND",
+      type: "SMS",
+      body,
+      twilioSid: messageSid,
     });
+
+    console.log("✅ Inbound message persisted:", inboundMessage.id);
 
     const clientSettings = await prisma.clientSettings.findUnique({
       where: { clientId: clientRecord.id },
     });
+
+    if (!clientSettings) {
+      console.error("❌ CRITICAL: ClientSettings not found for client:", clientRecord.id);
+      console.error("   This should have been caught at startup");
+      // Return 500 to trigger Twilio retry
+      return res.status(500).send("Server configuration error");
+    }
 
     const { replyMessage } = await handleInboundSms({
       client: clientRecord,
@@ -130,34 +157,43 @@ router.post("/sms", async (req, res) => {
       clientSettings,
     });
 
-    if (replyMessage) {
+    console.log("🔍 TWILIO WEBHOOK: replyMessage from pipeline:", replyMessage);
+
+    // Only return TwiML after successful DB persistence
+    if (replyMessage && replyMessage.trim().length > 0) {
       const twiml = `
     <Response>
       <Message>${replyMessage}</Message>
     </Response>
   `;
 
+      console.log("📤 TWILIO WEBHOOK: Sending TwiML response with message");
       res.type("text/xml");
       res.send(twiml);
     } else {
+      console.warn("⚠️ TWILIO WEBHOOK: No reply message - sending default TwiML");
+      const defaultReply = "Thank you for your message. We'll be in touch shortly.";
+      const twiml = `
+    <Response>
+      <Message>${defaultReply}</Message>
+    </Response>
+  `;
       res.type("text/xml");
-      res.send("<Response></Response>");
+      res.send(twiml);
     }
 
   } catch (error) {
     console.error("❌ SMS webhook error:", error);
+    console.error("❌ Error details:", {
+      name: (error as Error).name,
+      message: (error as Error).message,
+      stack: (error as Error).stack,
+    });
 
-    const fallbackReply = "Sorry, I'm having trouble right now. Someone from the team will get back to you shortly.";
-    const twiml = `
-    <Response>
-      <Message>${fallbackReply}</Message>
-    </Response>
-  `;
-
-    res.type("text/xml");
-    res.send(twiml);
+    // CRITICAL: Return HTTP 500 to trigger Twilio retry
+    // Do NOT return TwiML on failure - message must be retried
+    res.status(500).send("Message processing failed");
   }
 });
 
 export default router;
- 

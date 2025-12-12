@@ -1,0 +1,40 @@
+diff --git a/apps/backend/src/ai/utils/lyra.ts b/apps/backend/src/ai/utils/lyra.ts
+--- a/apps/backend/src/ai/utils/lyra.ts
++++ b/apps/backend/src/ai/utils/lyra.ts
+@@
+-interface LyraOutput {
+-  message: string;
+-}
++interface LyraOutput {
++  reply: string;
++}
+
+@@
+ export async function generateReply(
+   params: GenerateReplyParams
+ ): Promise<string> {
++  console.log("🧠 LYRA invoked with action:", params.action);
+
+   const response = await llm.generate({
+@@
+-  try {
+-    const parsed: LyraOutput = JSON.parse(response.content);
+-    return parsed.message.trim();
+-  } catch {
+-    return "Thanks for your message. Someone from the team will get back to you shortly.";
+-  }
++  const raw = response.content;
++  console.log("🔍 LYRA raw response:", raw);
++
++  let parsed: any = null;
++  try {
++    parsed = JSON.parse(raw);
++  } catch {}
++
++  if (!parsed || typeof parsed.reply !== "string" || parsed.reply.trim() === "") {
++    console.error("❌ LYRA JSON PARSE FAILURE");
++    return "__LYRA_PARSE_ERROR__";
++  }
++
++  return parsed.reply.trim();
+ }

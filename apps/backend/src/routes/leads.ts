@@ -1,10 +1,8 @@
 import { Router } from "express";
-import { PrismaClient } from "@prisma/client";
+import { prisma } from "../db";
 import { authenticate } from "../middleware/auth";
 import { AuthenticatedRequest } from "../types/express";
 import { Response } from "express";
-
-const prisma = new PrismaClient();
 const router = Router();
 
 // GET /api/leads — fetch leads for logged-in client
@@ -40,14 +38,27 @@ router.post("/fake", authenticate, async (req: AuthenticatedRequest, res: Respon
       return res.status(400).json({ error: "No clientId found for user" });
     }
 
+    // Create customer first (Lead requires customerId)
+    const customer = await prisma.customer.create({
+      data: {
+        clientId,
+        phone: "07123456789",
+        name: "Test Lead",
+        email: "testlead@example.com",
+        state: "NEW",
+      }
+    });
+
+    // Then create lead linked to customer
     const lead = await prisma.lead.create({
       data: {
         clientId,
-        name: "Test Lead",
-        phone: "07123456789",
-        email: "testlead@example.com",
-        status: "NEW",
-        source: "FAKE",
+        customerId: customer.id,
+        state: "NEW",
+        jobType: "",
+        urgency: "",
+        location: "",
+        requestedTime: "",
         notes: "Fake lead for dashboard testing.",
         createdAt: date ? new Date(date) : new Date()
       }

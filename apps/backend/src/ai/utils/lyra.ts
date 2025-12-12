@@ -10,6 +10,7 @@
 import { LLMClient } from "../../llm/LLMClient";
 import { ClientSettings, Message } from "@prisma/client";
 import { ExtractedEntities } from "./flow";
+import { logAiEvent } from "./aiLogger";
 
 export type LyraAction =
   | "SEND_CLARIFY_QUESTION"
@@ -42,7 +43,7 @@ interface LyraInput {
 }
 
 interface LyraOutput {
-  message: string;
+  reply: string;
 }
 
 function getBookingUrl(clientSettings: ClientSettings | null): string | null {
@@ -64,6 +65,28 @@ Your job is to produce short, clear, friendly, professional SMS replies based on
 You MUST output STRICT JSON ONLY with NO additional text.
 
 ##############################################
+CRITICAL JSON RULES
+##############################################
+
+YOU MUST RETURN ONLY A SINGLE JSON OBJECT.
+
+- NO preamble
+- NO prose
+- NO markdown fences (no \`\`\`json)
+- NO commentary
+- NO explanations
+- ONLY the JSON object
+
+The JSON object must have EXACTLY one field:
+
+{
+  "reply": "<your SMS message here>"
+}
+
+Field name MUST be "reply" (not "message", not "text", not "response").
+Value MUST be a non-empty string.
+
+##############################################
 POSSIBLE ACTIONS YOU MUST HANDLE
 ##############################################
 
@@ -76,13 +99,9 @@ POSSIBLE ACTIONS YOU MUST HANDLE
 STRICT OUTPUT FORMAT
 ##############################################
 
-Respond ONLY with:
+Respond with ONLY the JSON object defined above. No other text.
 
-{
-  "message": ""
-}
-
-Rules for the "message" field:
+Rules for the "reply" field:
 - Maximum 2 sentences.
 - Friendly but efficient.
 - No emojis.
@@ -156,9 +175,9 @@ VARIABLE RULES
 ABSOLUTE RULES
 ##############################################
 
-- Always return JSON.
-- Never write outside the JSON.
-- Never show reasoning.
+- ALWAYS return valid JSON with the "reply" field.
+- NEVER write any text outside the JSON object.
+- NEVER show reasoning or explanations.
 - Never output internal agent names or anything about decision logic.
 - Never ask unnecessary questions.
 - Keep everything clean, short, and professional.`;
@@ -176,6 +195,57 @@ Input:
 ${JSON.stringify(input, null, 2)}
 
 Generate the SMS reply following the rules for action: ${input.action}`;
+}
+
+function extractJsonFromResponse(rawContent: string): LyraOutput | null {
+  // Attempt 1: Direct JSON parse
+  try {
+    const parsed = JSON.parse(rawContent);
+    if (parsed && typeof parsed === "object") {
+      if ("reply" in parsed && typeof parsed.reply === "string") {
+        return { reply: parsed.reply };
+      }
+      if ("message" in parsed && typeof parsed.message === "string") {
+        console.log("🔁 LYRA NORMALIZED message → reply");
+        return { reply: parsed.message };
+      }
+    }
+  } catch {
+    // Continue to regex extraction
+  }
+
+  // Attempt 2: Extract JSON with either "reply" or "message" field
+  const jsonMatch = rawContent.match(/\{[^{}]*"(reply|message)"\s*:\s*"[^"]*"[^{}]*\}/);
+  if (jsonMatch) {
+    try {
+      const parsed = JSON.parse(jsonMatch[0]);
+      if (parsed && typeof parsed === "object") {
+        if ("reply" in parsed && typeof parsed.reply === "string") {
+          return { reply: parsed.reply };
+        }
+        if ("message" in parsed && typeof parsed.message === "string") {
+          console.log("🔁 LYRA NORMALIZED message → reply");
+          return { reply: parsed.message };
+        }
+      }
+    } catch {
+      // Continue to nested extraction
+    }
+  }
+
+  // Attempt 3: Deep nested extraction (try both fields)
+  let deepMatch = rawContent.match(/"reply"\s*:\s*"([^"]*)"/);
+  if (!deepMatch) {
+    deepMatch = rawContent.match(/"message"\s*:\s*"([^"]*)"/);
+    if (deepMatch && deepMatch[1]) {
+      console.log("🔁 LYRA NORMALIZED message → reply");
+    }
+  }
+  if (deepMatch && deepMatch[1]) {
+    return { reply: deepMatch[1] };
+  }
+
+  return null;
 }
 
 export async function generateReply(
@@ -215,19 +285,39 @@ export async function generateReply(
     jsonMode: true,
   });
 
-  try {
-    const parsed: LyraOutput = JSON.parse(response.content);
-    let message = parsed.message.trim();
+  console.log("🔍 LYRA RAW OUTPUT:", response.content);
 
-    // Ensure SMS length limit
-    if (message.length > 1600) {
-      message = message.substring(0, 1600);
-    }
+  const parsed = extractJsonFromResponse(response.content);
+  console.log("🔍 EXTRACTION RESULT:", parsed ? "SUCCESS" : "FAILED", parsed);
 
-    return message;
-  } catch (err) {
-    console.error("LYRA: Failed to parse JSON response:", err);
-    // Fallback message
-    return "Thanks for your message. Someone from the team will get back to you shortly.";
+  if (!parsed) {
+    console.error("❌ LYRA JSON PARSE FAILED: Could not extract JSON");
+    console.error("Raw LLM output:", response.content);
+
+    await logAiEvent({
+      clientId: clientSettings?.clientId || "unknown",
+      direction: "SYSTEM",
+      type: "EVENT",
+      content: "LYRA JSON parse failure: No valid JSON found",
+      metadata: { rawResponse: response.content, action },
+    }).catch(() => {});
+
+    return "__LYRA_PARSE_ERROR__";
   }
+
+  let message = parsed.reply?.trim() || "";
+
+  if (!message || message.length === 0) {
+    console.error("❌ LYRA EMPTY REPLY:", parsed);
+    return "__LYRA_PARSE_ERROR__";
+  }
+
+  console.log("✅ LYRA PARSED REPLY:", message);
+
+  // Ensure SMS length limit
+  if (message.length > 1600) {
+    message = message.substring(0, 1600);
+  }
+
+  return message;
 }

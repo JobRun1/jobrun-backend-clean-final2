@@ -5,14 +5,12 @@
  * Creates bookings when confirmed
  */
 
-import { PrismaClient } from '@prisma/client';
+import { prisma } from '../db';
 import { SchedulingBrain, SchedulingRequest, SchedulingResponse } from './SchedulingBrain';
 import { AdminLogger } from './AdminLogger';
 import { MessageTemplates } from './MessageTemplates';
 import { HandoverManager } from './HandoverManager';
 import { WebSocketGateway } from '../realtime/WebSocketGateway';
-
-const prisma = new PrismaClient();
 
 export interface HandleSchedulingRequest {
   message: string;

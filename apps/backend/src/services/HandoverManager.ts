@@ -9,10 +9,8 @@
  * - Notification throttling
  */
 
-import { PrismaClient } from '@prisma/client';
+import { prisma } from '../db';
 import { WebSocketGateway } from '../realtime/WebSocketGateway';
-
-const prisma = new PrismaClient();
 
 export interface HandoverState {
   id: string;

@@ -3,10 +3,8 @@
  * Run with: tsx apps/backend/src/agents/test-agent-system.ts
  */
 
-import { PrismaClient } from '@prisma/client';
+import { prisma } from '../db';
 import { initializeAgentSystem, getAgentManifest } from './index';
-
-const prisma = new PrismaClient();
 
 async function testAgentSystem() {
   console.log('🧪 Testing JobRun Agent System\n');

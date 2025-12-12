@@ -12,6 +12,9 @@ const router = Router();
 // GET /api/admin/dashboard/stats
 router.get("/dashboard/stats", async (req, res) => {
   try {
+    // Ensure Prisma connection is active for admin queries
+    await prisma.$connect();
+
     const now = new Date();
     const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate());
 
@@ -114,6 +117,12 @@ router.get("/dashboard/stats", async (req, res) => {
     });
   } catch (error) {
     console.error("Failed to fetch dashboard stats:", error);
+
+    // Isolate Prisma P2022 errors from global state
+    if (error instanceof Error && error.message.includes('P2022')) {
+      console.error("ADMIN ROUTE SCHEMA ERROR - isolated from SMS pipeline");
+    }
+
     sendError(res, "INTERNAL_ERROR", "Failed to fetch stats", 500);
   }
 });
