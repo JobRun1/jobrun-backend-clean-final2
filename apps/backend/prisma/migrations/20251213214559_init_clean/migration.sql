@@ -19,6 +19,12 @@ CREATE TYPE "LeadSource" AS ENUM ('INBOUND', 'OUTBOUND', 'REFERRAL', 'WEBSITE', 
 -- CreateEnum
 CREATE TYPE "LeadStatus" AS ENUM ('NEW', 'CONTACTED', 'QUALIFIED', 'CONVERTED', 'LOST');
 
+-- CreateEnum
+CREATE TYPE "CustomerState" AS ENUM ('NEW', 'POST_CALL', 'POST_CALL_REPLIED', 'CUSTOMER_REPLIED', 'QUALIFIED', 'BOOKED', 'CONVERTED', 'LOST');
+
+-- CreateEnum
+CREATE TYPE "LeadState" AS ENUM ('NEW', 'NEEDS_INFO', 'QUALIFIED', 'URGENT', 'AWAITING_BOOKING', 'CLOSED');
+
 -- CreateTable
 CREATE TABLE "clients" (
     "id" TEXT NOT NULL,
@@ -27,9 +33,11 @@ CREATE TABLE "clients" (
     "businessName" TEXT NOT NULL,
     "region" TEXT NOT NULL,
     "phoneNumber" TEXT,
+    "twilioNumber" TEXT,
     "businessHours" JSONB,
     "timezone" TEXT NOT NULL DEFAULT 'America/New_York',
     "demoToolsVisible" BOOLEAN NOT NULL DEFAULT true,
+    "demoClient" BOOLEAN NOT NULL DEFAULT false,
 
     CONSTRAINT "clients_pkey" PRIMARY KEY ("id")
 );
@@ -56,6 +64,7 @@ CREATE TABLE "customers" (
     "phone" TEXT NOT NULL,
     "name" TEXT,
     "email" TEXT,
+    "state" "CustomerState" NOT NULL DEFAULT 'NEW',
 
     CONSTRAINT "customers_pkey" PRIMARY KEY ("id")
 );
@@ -193,15 +202,29 @@ CREATE TABLE "leads" (
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updatedAt" TIMESTAMP(3) NOT NULL,
     "clientId" TEXT NOT NULL,
-    "phone" TEXT NOT NULL,
-    "name" TEXT,
-    "email" TEXT,
-    "source" "LeadSource" NOT NULL DEFAULT 'INBOUND',
-    "status" "LeadStatus" NOT NULL DEFAULT 'NEW',
-    "notes" TEXT,
-    "qualificationData" JSONB,
+    "customerId" TEXT NOT NULL,
+    "state" "LeadState" NOT NULL DEFAULT 'NEW',
+    "jobType" TEXT NOT NULL DEFAULT '',
+    "urgency" TEXT NOT NULL DEFAULT '',
+    "location" TEXT NOT NULL DEFAULT '',
+    "requestedTime" TEXT NOT NULL DEFAULT '',
+    "notes" TEXT NOT NULL DEFAULT '',
+    "sentBooking" BOOLEAN NOT NULL DEFAULT false,
+    "askedClarify" BOOLEAN NOT NULL DEFAULT false,
+    "escalated" BOOLEAN NOT NULL DEFAULT false,
 
     CONSTRAINT "leads_pkey" PRIMARY KEY ("id")
+);
+
+-- CreateTable
+CREATE TABLE "impersonation_logs" (
+    "id" TEXT NOT NULL,
+    "adminId" TEXT NOT NULL,
+    "clientId" TEXT NOT NULL,
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "expiresAt" TIMESTAMP(3) NOT NULL,
+
+    CONSTRAINT "impersonation_logs_pkey" PRIMARY KEY ("id")
 );
 
 -- CreateTable
@@ -228,6 +251,9 @@ CREATE INDEX "customers_clientId_idx" ON "customers"("clientId");
 
 -- CreateIndex
 CREATE INDEX "customers_phone_idx" ON "customers"("phone");
+
+-- CreateIndex
+CREATE INDEX "customers_state_idx" ON "customers"("state");
 
 -- CreateIndex
 CREATE UNIQUE INDEX "customers_clientId_phone_key" ON "customers"("clientId", "phone");
@@ -287,16 +313,25 @@ CREATE INDEX "agent_logs_createdAt_idx" ON "agent_logs"("createdAt");
 CREATE UNIQUE INDEX "client_settings_clientId_key" ON "client_settings"("clientId");
 
 -- CreateIndex
-CREATE UNIQUE INDEX "leads_clientId_phone_key" ON "leads"("clientId", "phone");
-
--- CreateIndex
 CREATE INDEX "leads_clientId_idx" ON "leads"("clientId");
 
 -- CreateIndex
-CREATE INDEX "leads_phone_idx" ON "leads"("phone");
+CREATE INDEX "leads_customerId_idx" ON "leads"("customerId");
 
 -- CreateIndex
-CREATE INDEX "leads_status_idx" ON "leads"("status");
+CREATE INDEX "leads_state_idx" ON "leads"("state");
+
+-- CreateIndex
+CREATE UNIQUE INDEX "leads_clientId_customerId_key" ON "leads"("clientId", "customerId");
+
+-- CreateIndex
+CREATE INDEX "impersonation_logs_adminId_idx" ON "impersonation_logs"("adminId");
+
+-- CreateIndex
+CREATE INDEX "impersonation_logs_clientId_idx" ON "impersonation_logs"("clientId");
+
+-- CreateIndex
+CREATE INDEX "impersonation_logs_createdAt_idx" ON "impersonation_logs"("createdAt");
 
 -- CreateIndex
 CREATE UNIQUE INDEX "handover_states_conversationId_key" ON "handover_states"("conversationId");
@@ -339,3 +374,9 @@ ALTER TABLE "bookings" ADD CONSTRAINT "bookings_customerId_fkey" FOREIGN KEY ("c
 
 -- AddForeignKey
 ALTER TABLE "bookings" ADD CONSTRAINT "bookings_recurrenceRuleId_fkey" FOREIGN KEY ("recurrenceRuleId") REFERENCES "recurrence_rules"("id") ON DELETE SET NULL ON UPDATE CASCADE;
+
+-- AddForeignKey
+ALTER TABLE "leads" ADD CONSTRAINT "leads_clientId_fkey" FOREIGN KEY ("clientId") REFERENCES "clients"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+
+-- AddForeignKey
+ALTER TABLE "leads" ADD CONSTRAINT "leads_customerId_fkey" FOREIGN KEY ("customerId") REFERENCES "customers"("id") ON DELETE CASCADE ON UPDATE CASCADE;

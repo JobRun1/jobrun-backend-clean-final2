@@ -1,4 +1,4 @@
-import { PrismaClient, LeadStatus, LeadSource, BookingStatus, MessageDirection, MessageType } from "@prisma/client";
+import { PrismaClient, LeadState, BookingStatus, MessageDirection, MessageType } from "@prisma/client";
 import { faker } from "@faker-js/faker";
 
 const prisma = new PrismaClient();
@@ -20,12 +20,13 @@ const randomPhone = () =>
 /**
  * Lead state distribution for realism
  */
-const LEAD_STATUSES: LeadStatus[] = [
-  LeadStatus.NEW,
-  LeadStatus.CONTACTED,
-  LeadStatus.QUALIFIED,
-  LeadStatus.CONVERTED,
-  LeadStatus.LOST,
+const LEAD_STATES: LeadState[] = [
+  LeadState.NEW,
+  LeadState.NEEDS_INFO,
+  LeadState.QUALIFIED,
+  LeadState.URGENT,
+  LeadState.AWAITING_BOOKING,
+  LeadState.CLOSED,
 ];
 
 /**
@@ -101,21 +102,7 @@ async function main() {
       const customerName = faker.person.fullName();
       const customerEmail = faker.internet.email();
 
-      // Create Lead
-      const lead = await prisma.lead.create({
-        data: {
-          clientId: client.id,
-          phone: leadPhone,
-          name: customerName,
-          email: customerEmail,
-          status: pick(LEAD_STATUSES),
-          source: LeadSource.INBOUND,
-        },
-      });
-
-      totalLeads++;
-
-      // Create Customer
+      // Create Customer first (Lead requires customerId)
       const customer = await prisma.customer.create({
         data: {
           clientId: client.id,
@@ -124,6 +111,22 @@ async function main() {
           email: customerEmail,
         },
       });
+
+      // Create Lead
+      const lead = await prisma.lead.create({
+        data: {
+          clientId: client.id,
+          customerId: customer.id,
+          state: pick(LEAD_STATES),
+          jobType: faker.helpers.arrayElement(["Plumbing", "Electrical", "HVAC", "General Repair"]),
+          urgency: faker.helpers.arrayElement(["Low", "Medium", "High", "Emergency"]),
+          location: faker.location.streetAddress(),
+          requestedTime: faker.helpers.arrayElement(["Morning", "Afternoon", "Evening", "ASAP"]),
+          notes: faker.lorem.sentence(),
+        },
+      });
+
+      totalLeads++;
 
       // Create Conversation
       const conversation = await prisma.conversation.create({
