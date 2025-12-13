@@ -45,7 +45,6 @@ import http from "http";
 import { prisma } from "./db";
 import twilioRoutes from "./routes/twilio";
 import adminRoutes from "./routes/admin";
-import adminDemoRoutes from "./routes/admin-demo";
 import impersonationRoutes from "./routes/impersonation";
 import clientLeadsRoutes from "./routes/client-leads";
 import clientMessagesRoutes from "./routes/client-messages";
@@ -151,7 +150,6 @@ export function createServer() {
   // Routes
   app.use("/twilio", twilioRoutes);
   app.use("/api/admin", adminRoutes); // ⭐ CRITICAL MOUNT
-  app.use("/api/admin/demo", adminDemoRoutes);
   app.use("/api/impersonate", impersonationRoutes);
   app.use("/api/client/leads", clientLeadsRoutes);
   app.use("/api/client/messages", clientMessagesRoutes);
