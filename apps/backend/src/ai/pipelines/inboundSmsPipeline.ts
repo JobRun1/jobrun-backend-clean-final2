@@ -153,12 +153,6 @@ export async function handleInboundSms(
       lead = await markEscalated(lead.id);
     }
 
-    // Update message record to link to lead
-    await prisma.message.update({
-      where: { id: inboundMessage.id },
-      data: { leadId: lead.id },
-    });
-
     console.log(`✅ VAULT: State = ${lead.state}, Flags = { sentBooking: ${lead.sentBooking}, askedClarify: ${lead.askedClarify}, escalated: ${lead.escalated} }`);
 
     console.log("7️⃣ LYRA: Generating reply...");
