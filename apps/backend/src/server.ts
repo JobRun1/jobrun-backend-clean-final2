@@ -10,15 +10,7 @@ export function createServer() {
   app.get("/", (_, res) => {
     res.json({
       message: "JobRun backend API is running",
-      health: "/api/health",
       version: "/api/version"
-    });
-  });
-
-  app.get("/api/health", (_, res) => {
-    res.json({
-      success: true,
-      data: { status: "ok", timestamp: new Date().toISOString() }
     });
   });
 
