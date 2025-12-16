@@ -101,7 +101,7 @@ async function validateDefaultClient() {
   console.log("STARTUP CONTRACT: Bootstrap Data Validation");
   console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
 
-  const defaultClientId = "INTENTIONALLY_BROKEN_CLIENT_ID";
+  const defaultClientId = process.env.DEFAULT_CLIENT_ID!;
   console.log(`Validating bootstrap for client: ${defaultClientId}\n`);
 
   // Use health check invariant validation for single source of truth
