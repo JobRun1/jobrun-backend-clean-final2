@@ -100,25 +100,16 @@ export class NotificationService {
     phoneNumber: string,
     payload: NotificationPayload
   ): Promise<void> {
-    // TODO: Integrate with Twilio
-    // For now, just log to console
-
     const message = this.formatSMSMessage(payload);
 
-    console.log('\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-    console.log('📱 SMS NOTIFICATION');
-    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-    console.log(`To: ${phoneNumber}`);
-    console.log(`Message:\n${message}`);
-    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
+    const { getTwilioClient } = await import('../twilio/client');
+    const twilioClient = getTwilioClient();
 
-    // In production:
-    // const twilioClient = getTwilioClient();
-    // await twilioClient.messages.create({
-    //   to: phoneNumber,
-    //   from: process.env.TWILIO_PHONE_NUMBER,
-    //   body: message,
-    // });
+    await twilioClient.messages.create({
+      to: phoneNumber,
+      from: process.env.TWILIO_NUMBER!,
+      body: message,
+    });
   }
 
   /**
