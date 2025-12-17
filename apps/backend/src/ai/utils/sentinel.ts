@@ -15,6 +15,7 @@ export interface SentinelGuardParams {
   clientId: string;
   lead: any; // Can be Lead or Customer, just need something
   messageText: string;
+  conversationHistory?: any[]; // Optional: existing messages in conversation
 }
 
 export interface SentinelGuardResult {
@@ -196,10 +197,12 @@ ABSOLUTE RULES
 export async function runSentinelGuard(
   params: SentinelGuardParams
 ): Promise<SentinelGuardResult> {
-  const { messageText } = params;
+  const { messageText, conversationHistory } = params;
 
   // Quick length checks
-  if (messageText.trim().length === 0) {
+  const trimmedText = messageText.trim();
+
+  if (trimmedText.length === 0) {
     return {
       allowed: false,
       category: "IRRELEVANT",
@@ -212,6 +215,23 @@ export async function runSentinelGuard(
       allowed: false,
       category: "BRAND_RISK",
       reason: "message too long",
+    };
+  }
+
+  // CONVERSATION CONTEXT CHECK:
+  // If there's existing conversation history, allow short replies that would
+  // otherwise be blocked as "meaningless". This enables natural back-and-forth
+  // like "yes", "tomorrow", "morning" in response to our questions.
+  const hasConversationContext = conversationHistory && conversationHistory.length > 0;
+  const isShortReply = trimmedText.length > 0 && trimmedText.length <= 20;
+  const isEmojiOnly = /^[\p{Emoji}\s]+$/u.test(trimmedText);
+
+  if (hasConversationContext && isShortReply && !isEmojiOnly) {
+    console.log(`✅ SENTINEL: Allowing short reply due to conversation context (${conversationHistory.length} messages): "${trimmedText}"`);
+    return {
+      allowed: true,
+      category: "SAFE",
+      reason: "short reply with context",
     };
   }
 

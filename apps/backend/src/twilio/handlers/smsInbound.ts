@@ -6,6 +6,7 @@ import { findOrCreateCustomer } from '../../modules/customer/service';
 import { findOrCreateConversation, addMessage } from '../../modules/conversation/service';
 import { sendSMS } from '../client';
 import { MessageDirection, MessageType } from '@prisma/client';
+import { metrics, MetricTwilioInboundSMS, MetricTwilioWebhookError } from '../../services/Metrics';
 
 /**
  * Handle inbound SMS from Twilio - Simplified version
@@ -13,6 +14,9 @@ import { MessageDirection, MessageType } from '@prisma/client';
 export async function handleInboundSMS(req: Request, res: Response): Promise<void> {
   try {
     const payload: TwilioSMSPayload = req.body;
+
+    // Metrics: Twilio inbound SMS received
+    metrics.increment(MetricTwilioInboundSMS);
 
     logger.info('📥 [SMS INBOUND] Received inbound SMS', {
       from: payload.From,
@@ -52,6 +56,9 @@ export async function handleInboundSMS(req: Request, res: Response): Promise<voi
     // Respond to Twilio with 200 OK
     res.status(200).send('OK');
   } catch (error) {
+    // Metrics: Twilio webhook error
+    metrics.increment(MetricTwilioWebhookError);
+
     logger.error('❌ [SMS INBOUND] Error handling inbound SMS:', error instanceof Error ? error : { error });
     res.status(500).send('Error processing SMS');
   }

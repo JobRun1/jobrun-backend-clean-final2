@@ -4,6 +4,16 @@ import { prisma } from "../db";
 import { resolveCustomer } from "../utils/resolveCustomer";
 import { handleInboundSms } from "../ai/pipelines/inboundSmsPipeline";
 import { findOrCreateConversation, addMessage } from "../modules/conversation/service";
+import {
+  isAdminPhone,
+  parseAdminCommand,
+  executeCallCommand,
+  executeTextCommand,
+  executePauseCommand,
+  executeResumeCommand,
+  getHelpText,
+} from "../services/AdminCommandService";
+import { sendOnboardingSms } from "../utils/onboardingSms";
 
 const router = Router();
 
@@ -27,7 +37,7 @@ router.post("/voice", async (req, res) => {
     <Response>
       <Say voice="Polly.Joanna">
         Hello! This is the JobRun automated assistant.
-        Thanks for calling — once your call ends, you'll receive a confirmation text.
+        We'll send you a text message with next steps. Thank you!
       </Say>
       <Hangup/>
     </Response>
@@ -50,15 +60,8 @@ router.post("/status", async (req, res) => {
   // When call is finished
   if (callStatus === "completed") {
     try {
-      await client.messages.create({
-        to: from,
-        from: twilioNumber,
-        body:
-          "Thanks for calling JobRun! Your call has now ended. " +
-          "If you're onboarding your business, just reply here and our assistant will guide you through setup."
-      });
-
-      console.log("📩 Post-call SMS sent to:", from);
+      await sendOnboardingSms(from, twilioNumber);
+      console.log("✅ Post-call onboarding SMS sent to:", from);
     } catch (err) {
       console.error("❌ Error sending post-call SMS:", err);
     }
@@ -67,14 +70,8 @@ router.post("/status", async (req, res) => {
   // Handle missed / failed calls
   if (["no-answer", "busy", "failed"].includes(callStatus)) {
     try {
-      await client.messages.create({
-        to: from,
-        from: twilioNumber,
-        body:
-          "Sorry we missed your call! If you're getting started with JobRun, just reply to this message and our assistant will help you."
-      });
-
-      console.log("📩 Missed-call SMS sent to:", from);
+      await sendOnboardingSms(from, twilioNumber);
+      console.log("✅ Missed-call onboarding SMS sent to:", from);
     } catch (err) {
       console.error("❌ Error sending missed-call SMS:", err);
     }
@@ -93,6 +90,79 @@ router.post("/sms", async (req, res) => {
   const messageSid = req.body.MessageSid;
 
   console.log("💬 Incoming SMS:", { from, body, messageSid });
+
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  // ADMIN COMMAND DETECTION (BYPASS AI PIPELINE)
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  if (isAdminPhone(from)) {
+    console.log("👤 [ADMIN CMD] Admin message detected from:", from);
+
+    const command = parseAdminCommand(body);
+    let replyMessage: string;
+
+    try {
+      const clientRecord = await prisma.client.findUnique({
+        where: { id: defaultClientId },
+      });
+
+      if (!clientRecord) {
+        console.error("❌ [ADMIN CMD] Default client not found");
+        return res.status(500).send("Server configuration error");
+      }
+
+      switch (command) {
+        case "CALL":
+          console.log("📞 [ADMIN CMD] Executing CALL command");
+          replyMessage = await executeCallCommand(defaultClientId, clientRecord);
+          break;
+
+        case "TEXT":
+          console.log("📤 [ADMIN CMD] Executing TEXT command");
+          replyMessage = await executeTextCommand(defaultClientId, clientRecord);
+          break;
+
+        case "PAUSE":
+          console.log("⏸️  [ADMIN CMD] Executing PAUSE command");
+          replyMessage = await executePauseCommand(defaultClientId);
+          break;
+
+        case "RESUME":
+          console.log("▶️  [ADMIN CMD] Executing RESUME command");
+          replyMessage = await executeResumeCommand(defaultClientId);
+          break;
+
+        case "UNKNOWN":
+        default:
+          console.log("❓ [ADMIN CMD] Unknown command, sending help text");
+          replyMessage = getHelpText();
+          break;
+      }
+
+      console.log("✅ [ADMIN CMD] Command executed, reply:", replyMessage);
+
+      // Return TwiML response
+      const twiml = `
+    <Response>
+      <Message>${replyMessage}</Message>
+    </Response>
+  `;
+      res.type("text/xml");
+      return res.send(twiml);
+    } catch (error) {
+      console.error("❌ [ADMIN CMD] Error executing command:", error);
+      const errorTwiml = `
+    <Response>
+      <Message>Action failed. Please try again.</Message>
+    </Response>
+  `;
+      res.type("text/xml");
+      return res.send(errorTwiml);
+    }
+  }
+
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  // CUSTOMER SMS → AI PIPELINE (UNCHANGED)
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
   try {
     const clientRecord = await prisma.client.findUnique({

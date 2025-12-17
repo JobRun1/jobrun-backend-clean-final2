@@ -41,11 +41,26 @@ export async function handleInboundSms(
   console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
 
   try {
+    console.log("0️⃣ VAULT: Loading conversation context for Sentinel...");
+    const messages = await prisma.message.findMany({
+      where: {
+        clientId: client.id,
+        customerId: customer.id,
+      },
+      orderBy: {
+        createdAt: "desc",
+      },
+      take: 20,
+    });
+    const context = { messages: messages.reverse() };
+    console.log(`✅ VAULT: Loaded ${context.messages.length} messages`);
+
     console.log("1️⃣ SENTINEL: Running safety guard on inbound message...");
     const sentinelResult = await runSentinelGuard({
       clientId: client.id,
       lead: customer as any, // SENTINEL still expects old format, will be fixed separately
       messageText: inboundMessage.body,
+      conversationHistory: context.messages,
     });
 
     if (!sentinelResult.allowed) {
@@ -71,20 +86,6 @@ export async function handleInboundSms(
       customerId: customer.id,
     });
     console.log(`✅ VAULT: Lead ${lead.id} (state: ${lead.state})`);
-
-    console.log("2️⃣b VAULT: Loading conversation context...");
-    const messages = await prisma.message.findMany({
-      where: {
-        clientId: client.id,
-        customerId: customer.id,
-      },
-      orderBy: {
-        createdAt: "desc",
-      },
-      take: 20,
-    });
-    const context = { messages: messages.reverse() };
-    console.log(`✅ VAULT: Loaded ${context.messages.length} messages`);
 
     console.log("3️⃣ DIAL: Classifying intent...");
     const intentResult = await classifyIntent({

@@ -276,9 +276,10 @@ model ClientSettings {
   email         String?
   website       String?
   serviceArea   String?
-  theme         Json?
-  agentSettings Json?
-  metadata      Json?
+  theme                 Json?
+  agentSettings         Json?
+  metadata              Json?
+  notificationsPaused   Boolean  @default(false)
 
   @@map("client_settings")
 }

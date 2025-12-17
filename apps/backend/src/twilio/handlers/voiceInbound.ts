@@ -4,6 +4,7 @@ import { prisma } from '../../db';
 import { findOrCreateCustomer } from '../../modules/customer/service';
 import { findOrCreateConversation, addMessage } from '../../modules/conversation/service';
 import { MessageDirection, MessageType } from '@prisma/client';
+import { metrics, MetricTwilioInboundVoice, MetricTwilioWebhookError } from '../../services/Metrics';
 
 /**
  * Handle inbound voice call from Twilio - Simplified version
@@ -11,6 +12,9 @@ import { MessageDirection, MessageType } from '@prisma/client';
 export async function handleInboundVoice(req: Request, res: Response): Promise<void> {
   try {
     const payload = req.body;
+
+    // Metrics: Twilio inbound voice received
+    metrics.increment(MetricTwilioInboundVoice);
 
     logger.info('📞 [VOICE INBOUND] Received inbound call', {
       from: payload.From,
@@ -50,6 +54,9 @@ export async function handleInboundVoice(req: Request, res: Response): Promise<v
 
     res.type('text/xml').send(twiml);
   } catch (error) {
+    // Metrics: Twilio webhook error
+    metrics.increment(MetricTwilioWebhookError);
+
     logger.error('❌ [VOICE INBOUND] Error handling inbound call:', error instanceof Error ? error : { error });
 
     const errorTwiml = `<?xml version="1.0" encoding="UTF-8"?>

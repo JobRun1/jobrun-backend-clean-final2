@@ -3,6 +3,7 @@ import { findOrCreateConversation, addMessage } from '../conversation/service';
 import { sendSMS } from '../../twilio/client';
 import { logger } from '../../utils/logger';
 import { MessageDirection, MessageType } from '@prisma/client';
+import { sendOnboardingSms } from '../../utils/onboardingSms';
 
 /**
  * Route inbound SMS message
@@ -102,19 +103,18 @@ export async function routeMissedCall(params: {
       },
     });
 
-    // 4. Send placeholder SMS response for missed call
-    const responseBody = `Hi! We missed your call. JobRun Phase 2 - we'll get back to you soon!`;
+    // 4. Send canonical onboarding SMS for missed call
+    const twilioSid = await sendOnboardingSms(params.from, params.to);
 
-    const twilioSid = await sendSMS(params.from, params.to, responseBody);
-
-    // 5. Save outbound SMS message
+    // 5. Save outbound SMS message to database
+    const { ONBOARDING_MESSAGE } = await import('../../utils/onboardingSms');
     await addMessage({
       conversationId: conversation.id,
       clientId: params.clientId,
       customerId: customer.id,
       direction: MessageDirection.OUTBOUND,
       type: MessageType.SMS,
-      body: responseBody,
+      body: ONBOARDING_MESSAGE,
       twilioSid,
     });
 

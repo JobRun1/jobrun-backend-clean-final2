@@ -13,7 +13,8 @@
     "db:push": "prisma db push",
     "db:pull": "prisma db pull",
     "seed": "ts-node -r tsconfig-paths/register prisma/seed.ts",
-    "seed:prod": "ts-node -r tsconfig-paths/register prisma/seed-production.ts"
+    "seed:prod": "ts-node -r tsconfig-paths/register prisma/seed-production.ts",
+    "prepare": "cd ../.. && husky apps/backend/.husky"
   },
   "prisma": {
     "seed": "ts-node -r tsconfig-paths/register scripts/seed.ts"
@@ -43,6 +44,7 @@
     "@types/node": "^20.11.0",
     "@types/uuid": "^10.0.0",
     "@types/ws": "^8.18.1",
+    "husky": "^8.0.3",
     "prisma": "5.22.0",
     "ts-node": "^10.9.2",
     "ts-node-dev": "^2.0.0",
