@@ -166,7 +166,12 @@ export function createServer() {
   });
 
   app.get("/api/version", (req, res) => {
-    res.json({ version: "1.0.0" });
+    res.json({
+      version: "1.0.0",
+      onboardingSmsVersion: "v2-canonical",
+      buildTimestamp: new Date().toISOString(),
+      message: "NEW onboarding SMS with canonical sendOnboardingSms() function"
+    });
   });
 
   // Routes

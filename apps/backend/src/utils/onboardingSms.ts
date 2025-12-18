@@ -45,6 +45,9 @@ export async function sendOnboardingSms(
     throw new Error("TWILIO_NUMBER not configured");
   }
 
+  // Production verification marker
+  console.log("🚀 [ONBOARDING-V2] NEW canonical onboarding SMS active");
+
   const client = getTwilioClient();
 
   const message = await client.messages.create({
