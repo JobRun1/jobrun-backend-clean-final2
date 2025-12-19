@@ -1,0 +1,29 @@
+{
+  "timestamp": "2025-12-16T23:04:27Z",
+  "customer_phone": "+447700900123",
+  "message": "Hi, I missed a call earlier. I've got a leaking pipe and need help tomorrow morning if possible.",
+  "ai_classification": {
+    "intent": "NORMAL",
+    "confidence": 0.95,
+    "final_action": "SEND_BOOKING_AND_ALERT",
+    "action_reason": "flood risk"
+  },
+  "extracted_entities": {
+    "jobType": "plumbing",
+    "urgency": "water leak getting worse",
+    "location": null,
+    "requestedTime": "tomorrow morning",
+    "customerName": null,
+    "extraDetails": "Leaking pipe under the sink"
+  },
+  "lead_state": {
+    "initial": "NEW",
+    "final": "URGENT",
+    "escalated": true,
+    "sentBooking": false,
+    "askedClarify": false
+  },
+  "lead_id": "cmj96wmax0005oh3zv53y7wzg",
+  "customer_id": "cmj954els000192qfjyiuhnbh",
+  "conversation_id": "cmj954eri000392qf0yf8gak9"
+}

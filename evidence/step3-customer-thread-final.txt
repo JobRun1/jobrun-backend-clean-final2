@@ -1,0 +1,57 @@
+CUSTOMER SMS THREAD (FINAL TEST)
+=================================
+
+Test Date: 2025-12-16T23:29:00Z
+Customer: +447700900123
+Client: JobRun Plumbing Demo (+447476955179)
+
+COMPLETE CONVERSATION FLOW
+---------------------------
+
+[1] MISSED CALL EVENT
+Timestamp: 2025-12-16T23:29:00Z
+CallStatus: no-answer
+From: +447700900123
+To: +447476955179
+CallSid: CAstep3final001
+Result: Missed call recorded
+
+[2] CUSTOMER INBOUND SMS
+Timestamp: 2025-12-16T23:29:04Z
+From: +447700900123
+Message: "Hi, I've got a leaking pipe and need help tomorrow morning"
+Twilio SID: SMstep3final001
+Direction: INBOUND
+
+[3] AI PROCESSING
+Duration: ~6 seconds
+Steps:
+  1. SENTINEL: Safety check passed
+  2. VAULT: Existing lead found (cmj96wmax0005oh3zv53y7wzg)
+  3. DIAL: Intent = NORMAL (confidence: 0.95)
+  4. FLOW: Entities extracted
+       - jobType: plumbing
+       - urgency: water leak getting worse
+       - requestedTime: tomorrow morning
+       - details: leaking pipe under the sink
+  5. RUNE: Action = SEND_BOOKING_AND_ALERT (reason: flood risk)
+  6. VAULT: Lead marked URGENT, escalated = true
+  7. ALERT: Business notification sent
+  8. LYRA: Reply generated
+  9. SENTINEL: Outbound safety check passed
+
+[4] CUSTOMER OUTBOUND SMS
+Timestamp: 2025-12-16T23:29:10Z (estimated)
+To: +447700900123
+Message: "Thanks for your message. This sounds urgent — please book here and we'll review it straight away: https://calendly.com/jobrun-plumbing."
+Direction: OUTBOUND (via TwiML)
+
+SUMMARY
+-------
+✅ Missed call detected
+✅ Customer SMS received and persisted
+✅ AI extracted job + urgency + timing
+✅ Lead escalated in database
+✅ Customer received immediate automated reply
+⏱️ Total processing time: <10 seconds
+🚫 Zero human intervention required

@@ -1,0 +1,22 @@
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# JOBRUN CODEOWNERS
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#
+# These files are production-critical infrastructure.
+# Changes require approval from designated owners.
+#
+# Context: Past incident caused by missing bootstrap data.
+# Protection: CODEOWNERS + CI tests + branch protection.
+#
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+# Bootstrap Infrastructure (Requires incident review)
+apps/backend/prisma/migrations/*bootstrap* @OWNER_GITHUB_USERNAME
+apps/backend/src/index.ts @OWNER_GITHUB_USERNAME
+apps/backend/src/__tests__/bootstrap-survivability.test.ts @OWNER_GITHUB_USERNAME
+
+# CI/CD Configuration
+.github/workflows/test.yml @OWNER_GITHUB_USERNAME
+
+# Database Schema (Requires careful review)
+apps/backend/prisma/schema.prisma @OWNER_GITHUB_USERNAME

@@ -1,0 +1,86 @@
+STEP 3 DATABASE EVIDENCE EXTRACTION
+====================================
+
+1. CUSTOMER RECORD
+------------------
+{
+  "id": "cmj954els000192qfjyiuhnbh",
+  "createdAt": "2025-12-16T22:14:33.713Z",
+  "updatedAt": "2025-12-16T22:14:33.713Z",
+  "clientId": "default-client",
+  "phone": "+447700900123",
+  "name": null,
+  "email": null,
+  "state": "NEW"
+}
+
+2. CONVERSATION RECORD
+----------------------
+{
+  "id": "cmj954eri000392qf0yf8gak9",
+  "createdAt": "2025-12-16T22:14:33.918Z",
+  "updatedAt": "2025-12-16T23:04:27.678Z",
+  "clientId": "default-client",
+  "customerId": "cmj954els000192qfjyiuhnbh"
+}
+
+3. MESSAGE RECORDS
+------------------
+[
+  {
+    "id": "cmj954etk000592qfr3t00k9i",
+    "createdAt": "2025-12-16T22:14:33.992Z",
+    "clientId": "default-client",
+    "customerId": "cmj954els000192qfjyiuhnbh",
+    "conversationId": "cmj954eri000392qf0yf8gak9",
+    "direction": "INBOUND",
+    "type": "SMS",
+    "body": "Hi, I've got a leaking pipe under the sink and I need someone tomorrow morning if possible.",
+    "twilioSid": "SMtest123456789",
+    "metadata": null
+  },
+  {
+    "id": "cmj96wkqi0003oh3z7kanxdmd",
+    "createdAt": "2025-12-16T23:04:27.642Z",
+    "clientId": "default-client",
+    "customerId": "cmj954els000192qfjyiuhnbh",
+    "conversationId": "cmj954eri000392qf0yf8gak9",
+    "direction": "INBOUND",
+    "type": "SMS",
+    "body": "Hi, I missed a call earlier. I've got a leaking pipe and need help tomorrow morning if possible.",
+    "twilioSid": "SMstep3test001",
+    "metadata": null
+  }
+]
+
+4. LEAD RECORD
+--------------
+{
+  "id": "cmj96wmax0005oh3zv53y7wzg",
+  "createdAt": "2025-12-16T23:04:29.674Z",
+  "updatedAt": "2025-12-16T23:04:34.096Z",
+  "clientId": "default-client",
+  "customerId": "cmj954els000192qfjyiuhnbh",
+  "state": "URGENT",
+  "jobType": "plumbing",
+  "urgency": "water leak getting worse",
+  "location": "",
+  "requestedTime": "tomorrow morning",
+  "notes": "Leaking pipe under the sink",
+  "sentBooking": false,
+  "askedClarify": false,
+  "escalated": true
+}
+
+5. SUMMARY
+----------
+Customer ID: cmj954els000192qfjyiuhnbh
+Customer State: NEW
+Conversation ID: cmj954eri000392qf0yf8gak9
+Message Count: 2
+Lead ID: cmj96wmax0005oh3zv53y7wzg
+Lead State: URGENT
+Job Type: plumbing
+Urgency: water leak getting worse
+Requested Time: tomorrow morning
+Escalated: true

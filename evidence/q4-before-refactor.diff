@@ -1,0 +1,177 @@
+diff --git a/apps/backend/src/index.ts b/apps/backend/src/index.ts
+index b154f48..16d744d 100644
+--- a/apps/backend/src/index.ts
++++ b/apps/backend/src/index.ts
+@@ -51,9 +51,23 @@ import clientMessagesRoutes from "./routes/client-messages";
+ import clientSettingsRoutes from "./routes/client-settings";
+ import clientDashboardRoutes from "./routes/client-dashboard";
+ import onboardRoutes from "./routes/onboard";
++import { checkRuntimeInvariants } from "./services/HealthCheck";
++import { startRuntimeMonitor } from "./services/RuntimeMonitor";
++import {
++  metrics,
++  MetricStartupSuccess,
++  MetricBootstrapValidationSuccess,
++  MetricBootstrapValidationFailure,
++  MetricHealthCheckHealthy,
++  MetricHealthCheckUnhealthy,
++} from "./services/Metrics";
+ 
+ // Validate required ENV values
+ function validateEnv() {
++  console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
++  console.log("STARTUP CONTRACT: Environment Validation");
++  console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
++
+   const required = [
+     "DATABASE_URL",
+     "TWILIO_ACCOUNT_SID",
+@@ -65,18 +79,29 @@ function validateEnv() {
+   const missing = required.filter((key) => !process.env[key]);
+ 
+   if (missing.length > 0) {
+-    console.error("❌ Missing required environment variables:", missing);
++    console.error("❌ STARTUP CONTRACT VIOLATION");
++    console.error("   Missing required environment variables:", missing);
++    console.error("   Refusing to start with incomplete configuration");
+     process.exit(1);
+   }
+ 
+-  console.log("✅ All required environment variables present");
++  console.log("✅ Environment variables validated");
++  console.log(`   DATABASE_URL: configured`);
++  console.log(`   TWILIO_ACCOUNT_SID: configured`);
++  console.log(`   TWILIO_AUTH_TOKEN: configured`);
++  console.log(`   TWILIO_NUMBER: ${process.env.TWILIO_NUMBER}`);
++  console.log(`   DEFAULT_CLIENT_ID: ${process.env.DEFAULT_CLIENT_ID}`);
++  console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
+ }
+ 
+ // Validate default client exists in database
+ async function validateDefaultClient() {
+-  const defaultClientId = process.env.DEFAULT_CLIENT_ID!;
++  console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
++  console.log("STARTUP CONTRACT: Bootstrap Data Validation");
++  console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+ 
+-  console.log("🔍 Validating default client:", defaultClientId);
++  const defaultClientId = process.env.DEFAULT_CLIENT_ID!;
++  console.log(`Validating bootstrap for client: ${defaultClientId}\n`);
+ 
+   try {
+     const client = await prisma.client.findUnique({
+@@ -84,39 +109,57 @@ async function validateDefaultClient() {
+     });
+ 
+     if (!client) {
+-      console.error("❌ FATAL: Default client not found in database");
++      console.error("❌ STARTUP CONTRACT VIOLATION: DEFAULT_CLIENT_MISSING");
+       console.error(`   Expected client ID: ${defaultClientId}`);
+-      console.error("   Run SQL fix from deployment docs to create client");
++      console.error("   Database query returned null");
++      console.error("   Bootstrap migration may have failed");
++      console.error("   Refusing to start without default client");
+       process.exit(1);
+     }
++    console.log(`✅ Default client exists`);
++    console.log(`   ID: ${client.id}`);
++    console.log(`   Business: ${client.businessName}`);
+ 
+     const clientSettings = await prisma.clientSettings.findUnique({
+       where: { clientId: defaultClientId },
+     });
+ 
+     if (!clientSettings) {
+-      console.error("❌ FATAL: ClientSettings not found for default client");
++      console.error("❌ STARTUP CONTRACT VIOLATION: CLIENT_SETTINGS_MISSING");
+       console.error(`   Client ID: ${defaultClientId}`);
+-      console.error("   Run SQL fix from deployment docs to create settings");
++      console.error("   ClientSettings row does not exist");
++      console.error("   Bootstrap migration may have failed");
++      console.error("   Refusing to start without client settings");
+       process.exit(1);
+     }
++    console.log(`✅ Client settings exist`);
+ 
+     const metadata = clientSettings.metadata as Record<string, unknown> | null;
+     const bookingUrl = metadata?.bookingUrl;
+ 
+     if (!bookingUrl || typeof bookingUrl !== "string") {
+-      console.error("❌ FATAL: ClientSettings.metadata.bookingUrl is missing");
++      console.error("❌ STARTUP CONTRACT VIOLATION: BOOKING_URL_INVALID");
+       console.error(`   Client ID: ${defaultClientId}`);
+-      console.error("   Run SQL fix to set bookingUrl in metadata");
++      console.error(`   metadata.bookingUrl: ${bookingUrl}`);
++      console.error("   Refusing to start without valid booking URL");
+       process.exit(1);
+     }
++    console.log(`✅ Booking URL valid: ${bookingUrl}`);
+ 
+-    console.log("✅ Default client validated:");
+-    console.log(`   ID: ${client.id}`);
+-    console.log(`   Business: ${client.businessName}`);
+-    console.log(`   Booking URL: ${bookingUrl}`);
++    console.log("\n✅ BOOTSTRAP VALIDATION COMPLETE");
++    console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
++
++    // Metrics: Bootstrap validation succeeded
++    metrics.increment(MetricBootstrapValidationSuccess);
+   } catch (error) {
+-    console.error("❌ FATAL: Failed to validate default client:", error);
++    console.error("❌ STARTUP CONTRACT VIOLATION: DATABASE_ERROR");
++    console.error("   Failed to validate default client");
++    console.error("   Error:", error instanceof Error ? error.message : error);
++    console.error("   Refusing to start with database errors");
++
++    // Metrics: Bootstrap validation failed
++    metrics.increment(MetricBootstrapValidationFailure);
++
+     process.exit(1);
+   }
+ }
+@@ -139,8 +182,25 @@ export function createServer() {
+     });
+   });
+ 
+-  app.get("/api/health", (req, res) => {
+-    res.json({ status: "ok", timestamp: new Date().toISOString() });
++  app.get("/api/health", async (req, res) => {
++    const result = await checkRuntimeInvariants();
++
++    if (!result.healthy) {
++      metrics.increment(MetricHealthCheckUnhealthy);
++      return res.status(503).json({
++        status: "unhealthy",
++        timestamp: result.timestamp,
++        violations: result.violations,
++        invariants: result.invariants,
++      });
++    }
++
++    metrics.increment(MetricHealthCheckHealthy);
++    res.status(200).json({
++      status: "healthy",
++      timestamp: result.timestamp,
++      invariants: result.invariants,
++    });
+   });
+ 
+   app.get("/api/version", (req, res) => {
+@@ -177,6 +237,17 @@ async function start() {
+ 
+   server.listen(PORT, "0.0.0.0", () => {
+     console.log(`✅ Backend listening on 0.0.0.0:${PORT}`);
++
++    // Metrics: Startup successful
++    metrics.increment(MetricStartupSuccess);
++
++    // Start runtime invariant monitor (production only)
++    startRuntimeMonitor();
++
++    // Log initial metrics
++    console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
++    console.log("STARTUP COMPLETE — METRICS INITIALIZED");
++    console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
+   });
+ }
+ 

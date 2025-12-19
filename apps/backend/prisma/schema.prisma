@@ -74,10 +74,11 @@ model Customer {
   // NEW FIELD REQUIRED BY DASHBOARD
   state         CustomerState  @default(NEW)
 
-  bookings      Booking[]
-  conversations Conversation[]
-  messages      Message[]
-  leads         Lead[]
+  bookings         Booking[]
+  conversations    Conversation[]
+  messages         Message[]
+  leads            Lead[]
+  onboardingState  OnboardingState?
 
   @@unique([clientId, phone], name: "clientId_phone")
   @@index([clientId])
@@ -360,6 +361,29 @@ model HandoverState {
 
 //
 // ──────────────────────────────────────────────
+// ONBOARDING STATE (07476955179 ONLY)
+// ──────────────────────────────────────────────
+model OnboardingState {
+  id               String               @id @default(cuid())
+  createdAt        DateTime             @default(now()) @map("created_at")
+  updatedAt        DateTime             @updatedAt @map("updated_at")
+
+  customerId       String               @unique @map("customer_id")
+  customer         Customer             @relation(fields: [customerId], references: [id], onDelete: Cascade)
+
+  currentState     OnboardingStateEnum  @default(S1_BUSINESS_TYPE_LOCATION) @map("current_state")
+  collectedFields  Json                 @default("{}") @map("collected_fields")
+
+  lastMessageSid   String?              @map("last_message_sid")
+  completedAt      DateTime?            @map("completed_at")
+
+  @@index([currentState])
+  @@index([lastMessageSid])
+  @@map("onboarding_states")
+}
+
+//
+// ──────────────────────────────────────────────
 // ENUMS
 // ──────────────────────────────────────────────
 enum UserRole {
@@ -432,4 +456,14 @@ enum LeadState {
   URGENT
   AWAITING_BOOKING
   CLOSED
+}
+
+// ONBOARDING State Machine
+enum OnboardingStateEnum {
+  S1_BUSINESS_TYPE_LOCATION
+  S2_BUSINESS_NAME
+  S3_OWNER_NAME
+  S4_NOTIFICATION_PREF
+  S5_CONFIRM_LIVE
+  COMPLETE
 }

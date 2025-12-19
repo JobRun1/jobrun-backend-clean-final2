@@ -1,0 +1,167 @@
+diff --git a/apps/backend/src/index.ts b/apps/backend/src/index.ts
+index b154f48..635b1fd 100644
+--- a/apps/backend/src/index.ts
++++ b/apps/backend/src/index.ts
+@@ -51,9 +51,23 @@ import clientMessagesRoutes from "./routes/client-messages";
+ import clientSettingsRoutes from "./routes/client-settings";
+ import clientDashboardRoutes from "./routes/client-dashboard";
+ import onboardRoutes from "./routes/onboard";
++import { checkRuntimeInvariants, formatViolationsForLog } from "./services/HealthCheck";
++import { startRuntimeMonitor } from "./services/RuntimeMonitor";
++import {
++  metrics,
++  MetricStartupSuccess,
++  MetricBootstrapValidationSuccess,
++  MetricBootstrapValidationFailure,
++  MetricHealthCheckHealthy,
++  MetricHealthCheckUnhealthy,
++} from "./services/Metrics";
+ 
+ // Validate required ENV values
+ function validateEnv() {
++  console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
++  console.log("STARTUP CONTRACT: Environment Validation");
++  console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
++
+   const required = [
+     "DATABASE_URL",
+     "TWILIO_ACCOUNT_SID",
+@@ -65,60 +79,51 @@ function validateEnv() {
+   const missing = required.filter((key) => !process.env[key]);
+ 
+   if (missing.length > 0) {
+-    console.error("❌ Missing required environment variables:", missing);
++    console.error("❌ STARTUP CONTRACT VIOLATION");
++    console.error("   Missing required environment variables:", missing);
++    console.error("   Refusing to start with incomplete configuration");
+     process.exit(1);
+   }
+ 
+-  console.log("✅ All required environment variables present");
++  console.log("✅ Environment variables validated");
++  console.log(`   DATABASE_URL: configured`);
++  console.log(`   TWILIO_ACCOUNT_SID: configured`);
++  console.log(`   TWILIO_AUTH_TOKEN: configured`);
++  console.log(`   TWILIO_NUMBER: ${process.env.TWILIO_NUMBER}`);
++  console.log(`   DEFAULT_CLIENT_ID: ${process.env.DEFAULT_CLIENT_ID}`);
++  console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
+ }
+ 
+ // Validate default client exists in database
++// REFACTORED: Now uses checkRuntimeInvariants() for single source of truth
+ async function validateDefaultClient() {
+-  const defaultClientId = process.env.DEFAULT_CLIENT_ID!;
+-
+-  console.log("🔍 Validating default client:", defaultClientId);
+-
+-  try {
+-    const client = await prisma.client.findUnique({
+-      where: { id: defaultClientId },
+-    });
++  console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
++  console.log("STARTUP CONTRACT: Bootstrap Data Validation");
++  console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+ 
+-    if (!client) {
+-      console.error("❌ FATAL: Default client not found in database");
+-      console.error(`   Expected client ID: ${defaultClientId}`);
+-      console.error("   Run SQL fix from deployment docs to create client");
+-      process.exit(1);
+-    }
+-
+-    const clientSettings = await prisma.clientSettings.findUnique({
+-      where: { clientId: defaultClientId },
+-    });
+-
+-    if (!clientSettings) {
+-      console.error("❌ FATAL: ClientSettings not found for default client");
+-      console.error(`   Client ID: ${defaultClientId}`);
+-      console.error("   Run SQL fix from deployment docs to create settings");
+-      process.exit(1);
+-    }
++  const defaultClientId = process.env.DEFAULT_CLIENT_ID!;
++  console.log(`Validating bootstrap for client: ${defaultClientId}\n`);
+ 
+-    const metadata = clientSettings.metadata as Record<string, unknown> | null;
+-    const bookingUrl = metadata?.bookingUrl;
++  // Use health check invariant validation for single source of truth
++  const result = await checkRuntimeInvariants();
+ 
+-    if (!bookingUrl || typeof bookingUrl !== "string") {
+-      console.error("❌ FATAL: ClientSettings.metadata.bookingUrl is missing");
+-      console.error(`   Client ID: ${defaultClientId}`);
+-      console.error("   Run SQL fix to set bookingUrl in metadata");
+-      process.exit(1);
+-    }
++  if (!result.healthy) {
++    console.error("❌ STARTUP CONTRACT VIOLATION");
++    console.error(formatViolationsForLog(result.violations));
++    console.error("Refusing to start with broken bootstrap\n");
+ 
+-    console.log("✅ Default client validated:");
+-    console.log(`   ID: ${client.id}`);
+-    console.log(`   Business: ${client.businessName}`);
+-    console.log(`   Booking URL: ${bookingUrl}`);
+-  } catch (error) {
+-    console.error("❌ FATAL: Failed to validate default client:", error);
++    metrics.increment(MetricBootstrapValidationFailure);
+     process.exit(1);
+   }
++
++  // Log individual invariant results for startup visibility
++  console.log(`✅ Default client exists`);
++  console.log(`✅ Client settings exist`);
++  console.log(`✅ Booking URL valid`);
++  console.log("\n✅ BOOTSTRAP VALIDATION COMPLETE");
++  console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
++
++  metrics.increment(MetricBootstrapValidationSuccess);
+ }
+ 
+ // Create Express server
+@@ -139,8 +144,25 @@ export function createServer() {
+     });
+   });
+ 
+-  app.get("/api/health", (req, res) => {
+-    res.json({ status: "ok", timestamp: new Date().toISOString() });
++  app.get("/api/health", async (req, res) => {
++    const result = await checkRuntimeInvariants();
++
++    if (!result.healthy) {
++      metrics.increment(MetricHealthCheckUnhealthy);
++      return res.status(503).json({
++        status: "unhealthy",
++        timestamp: result.timestamp,
++        violations: result.violations,
++        invariants: result.invariants,
++      });
++    }
++
++    metrics.increment(MetricHealthCheckHealthy);
++    res.status(200).json({
++      status: "healthy",
++      timestamp: result.timestamp,
++      invariants: result.invariants,
++    });
+   });
+ 
+   app.get("/api/version", (req, res) => {
+@@ -177,6 +199,17 @@ async function start() {
+ 
+   server.listen(PORT, "0.0.0.0", () => {
+     console.log(`✅ Backend listening on 0.0.0.0:${PORT}`);
++
++    // Metrics: Startup successful
++    metrics.increment(MetricStartupSuccess);
++
++    // Start runtime invariant monitor (production only)
++    startRuntimeMonitor();
++
++    // Log initial metrics
++    console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
++    console.log("STARTUP COMPLETE — METRICS INITIALIZED");
++    console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
+   });
+ }
+ 

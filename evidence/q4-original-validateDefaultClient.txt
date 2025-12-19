@@ -1,0 +1,68 @@
+async function validateDefaultClient() {
+  console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+  console.log("STARTUP CONTRACT: Bootstrap Data Validation");
+  console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+
+  const defaultClientId = process.env.DEFAULT_CLIENT_ID!;
+  console.log(`Validating bootstrap for client: ${defaultClientId}\n`);
+
+  try {
+    const client = await prisma.client.findUnique({
+      where: { id: defaultClientId },
+    });
+
+    if (!client) {
+      console.error("❌ STARTUP CONTRACT VIOLATION: DEFAULT_CLIENT_MISSING");
+      console.error(`   Expected client ID: ${defaultClientId}`);
+      console.error("   Database query returned null");
+      console.error("   Bootstrap migration may have failed");
+      console.error("   Refusing to start without default client");
+      process.exit(1);
+    }
+    console.log(`✅ Default client exists`);
+    console.log(`   ID: ${client.id}`);
+    console.log(`   Business: ${client.businessName}`);
+
+    const clientSettings = await prisma.clientSettings.findUnique({
+      where: { clientId: defaultClientId },
+    });
+
+    if (!clientSettings) {
+      console.error("❌ STARTUP CONTRACT VIOLATION: CLIENT_SETTINGS_MISSING");
+      console.error(`   Client ID: ${defaultClientId}`);
+      console.error("   ClientSettings row does not exist");
+      console.error("   Bootstrap migration may have failed");
+      console.error("   Refusing to start without client settings");
+      process.exit(1);
+    }
+    console.log(`✅ Client settings exist`);
+
+    const metadata = clientSettings.metadata as Record<string, unknown> | null;
+    const bookingUrl = metadata?.bookingUrl;
+
+    if (!bookingUrl || typeof bookingUrl !== "string") {
+      console.error("❌ STARTUP CONTRACT VIOLATION: BOOKING_URL_INVALID");
+      console.error(`   Client ID: ${defaultClientId}`);
+      console.error(`   metadata.bookingUrl: ${bookingUrl}`);
+      console.error("   Refusing to start without valid booking URL");
+      process.exit(1);
+    }
+    console.log(`✅ Booking URL valid: ${bookingUrl}`);
+
+    console.log("\n✅ BOOTSTRAP VALIDATION COMPLETE");
+    console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
+
+    // Metrics: Bootstrap validation succeeded
+    metrics.increment(MetricBootstrapValidationSuccess);
+  } catch (error) {
+    console.error("❌ STARTUP CONTRACT VIOLATION: DATABASE_ERROR");
+    console.error("   Failed to validate default client");
+    console.error("   Error:", error instanceof Error ? error.message : error);
+    console.error("   Refusing to start with database errors");
+
+    // Metrics: Bootstrap validation failed
+    metrics.increment(MetricBootstrapValidationFailure);
+
+    process.exit(1);
+  }
+}

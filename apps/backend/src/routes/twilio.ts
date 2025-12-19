@@ -14,6 +14,7 @@ import {
   getHelpText,
 } from "../services/AdminCommandService";
 import { sendOnboardingSms } from "../utils/onboardingSms";
+import { handleOnboardingSms } from "../services/OnboardingService";
 
 const router = Router();
 
@@ -23,6 +24,26 @@ const twilioNumber = process.env.TWILIO_NUMBER!;
 const defaultClientId = process.env.DEFAULT_CLIENT_ID!;
 
 const client = twilio(accountSid, authToken);
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+//  PHONE NUMBER NORMALIZATION (handles multiple Twilio formats)
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+function normalizePhoneNumber(input?: string): string | null {
+  if (!input) return null;
+
+  // Remove all non-digit characters
+  let normalized = input.replace(/\D/g, "");
+
+  // Convert UK national format (07...) to international (447...)
+  if (normalized.startsWith("0")) {
+    normalized = "44" + normalized.substring(1);
+  }
+
+  return normalized;
+}
+
+// ONBOARDING-ONLY NUMBER (NORMALIZED - digits only)
+const ONBOARDING_ONLY_NUMBER = "447476955179";
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // 1. INCOMING VOICE CALL → Return TwiML only
@@ -86,10 +107,133 @@ router.post("/status", async (req, res) => {
 
 router.post("/sms", async (req, res) => {
   const from = req.body.From;
+  const to = req.body.To; // CRITICAL: The number being texted
   const body = req.body.Body?.trim() || "";
   const messageSid = req.body.MessageSid;
 
-  console.log("💬 Incoming SMS:", { from, body, messageSid });
+  console.log("💬 Incoming SMS:", { from, to, body, messageSid });
+
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  // HARD ROUTING GATE (DETERMINISTIC, NO AI)
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  //
+  // PRIORITY ORDER (STRICT):
+  // 1. Active onboarding state (highest priority)
+  // 2. Onboarding-only number check
+  // 3. Customer job pipeline (fallback only)
+  //
+  // GUARANTEE: If (1) or (2) matches → CUSTOMER_JOB pipeline is unreachable
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  const normalizedTo = normalizePhoneNumber(to);
+
+  // Resolve customer ONCE (needed for state check)
+  let customer;
+  try {
+    customer = await resolveCustomer({
+      clientId: defaultClientId,
+      phone: from,
+    });
+
+    if (!customer || !customer.id) {
+      console.error("❌ Customer resolution failed");
+      return res.status(500).send("Customer resolution failed");
+    }
+  } catch (error) {
+    console.error("❌ Customer resolution error:", error);
+    return res.status(500).send("Customer resolution failed");
+  }
+
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  // A) ACTIVE ONBOARDING STATE CHECK (HIGHEST PRIORITY)
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  const onboardingState = await prisma.onboardingState.findUnique({
+    where: { customerId: customer.id },
+  });
+
+  if (onboardingState) {
+    console.log("ROUTING_DECISION", {
+      mode: "ONBOARDING_ONLY",
+      reason: "ACTIVE_ONBOARDING_STATE",
+      customerId: customer.id,
+      to: normalizedTo,
+    });
+
+    try {
+      const { reply } = await handleOnboardingSms({
+        customer,
+        userInput: body,
+        messageSid,
+      });
+
+      if (reply && reply.trim().length > 0) {
+        const twiml = `
+    <Response>
+      <Message>${reply}</Message>
+    </Response>
+  `;
+        console.log("📤 [ONBOARDING_STATE] Sending TwiML response");
+        res.type("text/xml");
+        return res.send(twiml);
+      } else {
+        console.log("✅ [ONBOARDING_STATE] No reply needed");
+        res.sendStatus(200);
+        return;
+      }
+    } catch (error) {
+      console.error("❌ [ONBOARDING_STATE] Error:", error);
+      const errorTwiml = `
+    <Response>
+      <Message>System error. Please try again.</Message>
+    </Response>
+  `;
+      res.type("text/xml");
+      return res.send(errorTwiml);
+    }
+  }
+
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  // B) ONBOARDING-ONLY NUMBER CHECK
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  if (normalizedTo === ONBOARDING_ONLY_NUMBER) {
+    console.log("ROUTING_DECISION", {
+      mode: "ONBOARDING_ONLY",
+      reason: "ONBOARDING_NUMBER",
+      to: normalizedTo,
+    });
+
+    try {
+      const { reply } = await handleOnboardingSms({
+        customer,
+        userInput: body,
+        messageSid,
+      });
+
+      if (reply && reply.trim().length > 0) {
+        const twiml = `
+    <Response>
+      <Message>${reply}</Message>
+    </Response>
+  `;
+        console.log("📤 [ONBOARDING_NUMBER] Sending TwiML response");
+        res.type("text/xml");
+        return res.send(twiml);
+      } else {
+        console.log("✅ [ONBOARDING_NUMBER] No reply needed");
+        res.sendStatus(200);
+        return;
+      }
+    } catch (error) {
+      console.error("❌ [ONBOARDING_NUMBER] Error:", error);
+      const errorTwiml = `
+    <Response>
+      <Message>System error. Please try again.</Message>
+    </Response>
+  `;
+      res.type("text/xml");
+      return res.send(errorTwiml);
+    }
+  }
 
   // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   // ADMIN COMMAND DETECTION (BYPASS AI PIPELINE)
@@ -160,9 +304,15 @@ router.post("/sms", async (req, res) => {
     }
   }
 
-  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  // CUSTOMER SMS → AI PIPELINE (UNCHANGED)
-  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  // C) CUSTOMER JOB PIPELINE (FALLBACK ONLY)
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  console.log("ROUTING_DECISION", {
+    mode: "CUSTOMER_JOB",
+    reason: "FALLTHROUGH",
+    to: normalizedTo,
+  });
 
   try {
     const clientRecord = await prisma.client.findUnique({
@@ -178,17 +328,7 @@ router.post("/sms", async (req, res) => {
       return res.status(500).send("Server configuration error");
     }
 
-    const customer = await resolveCustomer({
-      clientId: clientRecord.id,
-      phone: from,
-    });
-
-    if (!customer || !customer.id) {
-      console.error("❌ CRITICAL: Customer resolution failed - no valid id");
-      // Return 500 to trigger Twilio retry
-      return res.status(500).send("Customer resolution failed");
-    }
-
+    // Customer already resolved at top of handler for routing checks
     // Find or create conversation BEFORE creating message
     const conversation = await findOrCreateConversation(
       clientRecord.id,

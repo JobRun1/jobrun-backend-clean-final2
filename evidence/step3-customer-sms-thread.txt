@@ -1,0 +1,59 @@
+CUSTOMER SMS THREAD
+===================
+Customer: +447700900123
+Client: JobRun Plumbing Demo
+Conversation ID: cmj954eri000392qf0yf8gak9
+
+TIMELINE
+--------
+
+[2025-12-16 22:14:33 UTC] INBOUND SMS
+From: +447700900123
+Message: "Hi, I've got a leaking pipe under the sink and I need someone tomorrow morning if possible."
+Twilio SID: SMtest123456789
+
+    ↓ AI PIPELINE EXECUTION (first attempt failed - missing API key)
+    ↓ Duration: ~5 seconds
+    ↓ Result: HTTP 500 (pipeline error)
+
+[2025-12-16 23:04:27 UTC] INBOUND SMS (retry/new message)
+From: +447700900123
+Message: "Hi, I missed a call earlier. I've got a leaking pipe and need help tomorrow morning if possible."
+Twilio SID: SMstep3test001
+
+    ↓ AI PIPELINE EXECUTION
+    ↓ 1. SENTINEL: Safety check passed
+    ↓ 2. VAULT: Lead created (cmj96wmax0005oh3zv53y7wzg)
+    ↓ 3. DIAL: Intent classified as NORMAL (confidence: 0.95)
+    ↓ 4. FLOW: Entities extracted
+    ↓     - jobType: "plumbing"
+    ↓     - urgency: "water leak getting worse"
+    ↓     - requestedTime: "tomorrow morning"
+    ↓     - extraDetails: "Leaking pipe under the sink"
+    ↓ 5. RUNE: Action decided = SEND_BOOKING_AND_ALERT (reason: flood risk)
+    ↓ 6. VAULT: Lead state changed NEW → URGENT
+    ↓ 7. ALERT: Notification attempted (no delivery - config missing)
+    ↓ 8. LYRA: Reply generated
+    ↓ 9. SENTINEL: Outbound safety check passed
+    ↓ Duration: ~9 seconds
+    ↓ Result: HTTP 200 OK
+
+[2025-12-16 23:04:36 UTC] OUTBOUND SMS (via TwiML response)
+To: +447700900123
+Message: "Thanks for your message. This sounds urgent — please book here and we'll review it straight away: https://calendly.com/jobrun-plumbing."
+
+CONVERSATION ANALYSIS
+---------------------
+✅ Customer initiated contact
+✅ AI acknowledged urgency
+✅ AI provided booking link
+✅ Lead marked as URGENT
+✅ Lead escalated for business review
+⚠️ Business notification attempted but not delivered (missing ADMIN_PHONE config)
+
+HUMAN INTERVENTION REQUIRED?
+NO - Customer received immediate automated response with booking link.
+YES - Business owner must check dashboard manually (no alert delivered).
+
+VERDICT: PARTIAL SUCCESS
+The AI receptionist successfully qualified the lead but failed to deliver the business alert.

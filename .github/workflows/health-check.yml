@@ -1,0 +1,73 @@
+name: Production Health Check
+
+# Runs daily at 8 AM UTC
+# Protects against silent degradation
+on:
+  schedule:
+    - cron: '0 8 * * *'
+  workflow_dispatch:  # Allow manual trigger
+
+jobs:
+  health-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Check production health endpoint
+        run: |
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "DAILY HEALTH CHECK"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "Target: ${{ secrets.PRODUCTION_URL }}/api/health"
+          echo "Time: $(date -u +"%Y-%m-%d %H:%M:%S UTC")"
+          echo ""
+
+          # Fetch health endpoint
+          response=$(curl -s -w "\n%{http_code}" "${{ secrets.PRODUCTION_URL }}/api/health")
+          http_code=$(echo "$response" | tail -n 1)
+          body=$(echo "$response" | sed '$d')
+
+          echo "HTTP Status: $http_code"
+          echo ""
+          echo "Response Body:"
+          echo "$body" | jq '.' || echo "$body"
+          echo ""
+
+          # Check if status is 200
+          if [ "$http_code" != "200" ]; then
+            echo "❌ HEALTH CHECK FAILED"
+            echo "Expected: HTTP 200"
+            echo "Received: HTTP $http_code"
+            echo ""
+            echo "PRODUCTION IS UNHEALTHY"
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            exit 1
+          fi
+
+          # Check if response contains "healthy" status
+          if ! echo "$body" | jq -e '.status == "healthy"' > /dev/null 2>&1; then
+            echo "❌ HEALTH CHECK FAILED"
+            echo "Expected: status == 'healthy'"
+            echo "Response did not indicate healthy status"
+            echo ""
+            echo "PRODUCTION IS UNHEALTHY"
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            exit 1
+          fi
+
+          echo "✅ HEALTH CHECK PASSED"
+          echo "All invariants satisfied"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+      - name: Notify on failure
+        if: failure()
+        run: |
+          echo "🚨 ALERT: Production health check failed"
+          echo "This workflow has detected that production is unhealthy."
+          echo "Immediate investigation required."
+          echo ""
+          echo "Next steps:"
+          echo "1. Check Railway logs"
+          echo "2. Review recent deployments"
+          echo "3. Verify bootstrap data integrity"
+          echo "4. Check database connectivity"

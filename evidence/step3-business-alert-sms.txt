@@ -1,0 +1,40 @@
+BUSINESS ALERT NOTIFICATION EVIDENCE
+=====================================
+Timestamp: 2025-12-16T23:04:27Z
+Status: ATTEMPTED (NOT DELIVERED)
+
+ALERT TRIGGER:
+- Action: SEND_BOOKING_AND_ALERT
+- Reason: flood risk
+- Urgency Level: HIGH
+- Urgency Score: 100
+
+NOTIFICATION ATTEMPT:
+✅ NotificationService.sendHandoverNotification() called
+✅ Notification payload constructed
+❌ SMS not sent (ADMIN_PHONE not configured)
+❌ Email not sent (ADMIN_EMAIL not configured)
+
+EXPECTED NOTIFICATION CONTENT:
+To: [ADMIN_PHONE not set]
+Subject: Urgent Lead Alert - plumbing
+
+Customer: +447700900123
+Job Type: plumbing
+Urgency: water leak getting worse
+Requested Time: tomorrow morning
+Details: Leaking pipe under the sink
+
+Last Messages:
+- "Hi, I've got a leaking pipe under the sink and I need someone tomorrow morning if possible."
+- "Thanks for your message. This sounds urgent — please book here and we'll review it straight away: https://calendly.com/jobrun-plumbing."
+
+Dashboard: https://app.jobrun.com/admin/messages?leadId=cmj96wmax0005oh3zv53y7wzg
+
+LIMITATION:
+The notification system is functional but requires ADMIN_PHONE and/or ADMIN_EMAIL
+environment variables to be configured for actual SMS/Email delivery.
+
+VERDICT:
+Alert mechanism: FUNCTIONAL
+Alert delivery: NOT CONFIGURED

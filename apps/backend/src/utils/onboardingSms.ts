@@ -40,13 +40,11 @@ export async function sendOnboardingSms(
 
   const client = getTwilioClient();
 
-  // 🚨 DEPLOYMENT PROOF — REMOVE AFTER VERIFICATION
-  throw new Error("ONBOARDING_SMS_ASSERTION_SHORT_V1_DEPLOYED");
-
-  // If this line ever executes, the assertion failed
   console.log("ONBOARDING_SMS_SENT", {
     to,
     version: "SHORT_V1",
+    preview: ONBOARDING_MESSAGE.slice(0, 40),
+    timestamp: new Date().toISOString(),
   });
 
   const message = await client.messages.create({

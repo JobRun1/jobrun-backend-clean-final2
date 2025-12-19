@@ -1,0 +1,63 @@
+#!/usr/bin/env sh
+. "$(dirname -- "$0")/_/husky.sh"
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# JOBRUN BOOTSTRAP PROTECTION
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# Prevents deletion or weakening of bootstrap infrastructure
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+echo "🔍 Checking for bootstrap infrastructure changes..."
+
+# Check if bootstrap migration is being deleted
+if git diff --cached --name-status | grep -q "^D.*bootstrap.*migration.sql"; then
+  echo ""
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  echo "❌ BLOCKED: Cannot delete bootstrap migration"
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  echo ""
+  echo "This file is production-critical infrastructure."
+  echo "Deletion would break fresh Railway environments."
+  echo ""
+  echo "If you must modify bootstrap logic:"
+  echo "  1. Create a NEW migration (do not delete old one)"
+  echo "  2. Update bootstrap-survivability.test.ts"
+  echo "  3. Get approval from @OWNER_GITHUB_USERNAME"
+  echo ""
+  echo "Incident context: apps/backend/docs/INCIDENT-BOOTSTRAP.md"
+  echo ""
+  exit 1
+fi
+
+# Check if validateDefaultClient is being removed or weakened
+if git diff --cached apps/backend/src/index.ts | grep -q "^-.*validateDefaultClient\|^-.*process.exit(1)"; then
+  echo ""
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  echo "❌ BLOCKED: Cannot remove or weaken validateDefaultClient()"
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  echo ""
+  echo "Startup validation must crash (process.exit(1)) if bootstrap missing."
+  echo ""
+  echo "If you need to modify validation:"
+  echo "  1. Ensure validation still crashes on missing data"
+  echo "  2. Update bootstrap-survivability.test.ts"
+  echo "  3. Verify CI passes with empty database"
+  echo ""
+  echo "Incident context: apps/backend/docs/INCIDENT-BOOTSTRAP.md"
+  echo ""
+  exit 1
+fi
+
+# Check if bootstrap test is being deleted or weakened
+if git diff --cached --name-status | grep -q "^D.*bootstrap-survivability.test.ts"; then
+  echo ""
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  echo "❌ BLOCKED: Cannot delete bootstrap survivability test"
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  echo ""
+  echo "This test is the only guarantee that fresh environments work."
+  echo ""
+  exit 1
+fi
+
+echo "✅ Bootstrap infrastructure protected"
