@@ -6,13 +6,13 @@
  * CRITICAL ASSUMPTIONS:
  * - Hard gate in twilio.ts ensures ONLY onboarding messages reach this service
  * - Sentinel/Dial/Flow/Lyra are BYPASSED for onboarding
- * - Initial onboarding SMS sent by server after call, not by Claude
- * - Claude is an UNTRUSTED extraction engine with zero autonomy
+ * - Initial onboarding SMS sent by server after call
+ * - OpenAI handles extraction only
  */
 
 import { prisma } from "../db";
 import { Customer, OnboardingState } from "@prisma/client";
-import Anthropic from "@anthropic-ai/sdk";
+import { LLMClient } from "../llm/LLMClient";
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 //  TYPES
@@ -26,10 +26,10 @@ type OnboardingStateValue =
   | "S5_CONFIRM_LIVE"
   | "COMPLETE";
 
-type ClaudeAction = "ACCEPT" | "REJECT" | "COMPLETE" | "ERROR";
+type ExtractionAction = "ACCEPT" | "REJECT" | "COMPLETE" | "ERROR";
 
-interface ClaudeResponse {
-  action: ClaudeAction;
+interface ExtractionResponse {
+  action: ExtractionAction;
   reply: string;
   extracted: Record<string, any> | null;
   next_state: OnboardingStateValue | null;
@@ -75,10 +75,10 @@ const CANONICAL_REPLIES: Record<OnboardingStateValue, Record<string, string[]>> 
 };
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-//  CLAUDE EXTRACTION PROMPT (INJECTED WITH CONTEXT)
+//  OPENAI EXTRACTION PROMPT (INJECTED WITH CONTEXT)
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-function buildClaudePrompt(context: OnboardingContext): string {
+function buildExtractionPrompt(context: OnboardingContext): string {
   return `You are an internal extraction engine for JobRun's ONBOARDING-ONLY SMS flow.
 
 You are NOT a chatbot.
@@ -272,53 +272,61 @@ Output valid JSON only.`;
 }
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-//  CLAUDE EXTRACTION
+//  OPENAI EXTRACTION
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-async function extractWithClaude(context: OnboardingContext): Promise<ClaudeResponse> {
-  const apiKey = process.env.ANTHROPIC_API_KEY;
+async function extractWithOpenAI(context: OnboardingContext): Promise<ExtractionResponse> {
+  const apiKey = process.env.OPENAI_API_KEY;
 
+  // HARDENING: Fallback if API key missing (prevents full onboarding failure)
   if (!apiKey) {
-    throw new Error("ANTHROPIC_API_KEY not configured");
+    console.error("❌ [OPENAI] OPENAI_API_KEY not configured - using fallback");
+    return {
+      action: "REJECT",
+      reply: CANONICAL_REPLIES[context.state]?.["REJECT"]?.[0] || "Please try again.",
+      extracted: null,
+      next_state: null,
+    };
   }
 
-  const client = new Anthropic({ apiKey });
+  const llmClient = new LLMClient();
 
-  console.log("🤖 [CLAUDE] Invoking extraction engine...");
+  console.log("🤖 [OPENAI] Invoking extraction engine...");
   console.log(`   State: ${context.state}`);
   console.log(`   Input: "${context.user_input}"`);
 
   try {
-    const response = await client.messages.create({
-      model: "claude-3-5-sonnet-20241022",
-      max_tokens: 1024,
+    const response = await llmClient.generate({
+      model: "gpt-4o-mini",
+      systemPrompt: buildExtractionPrompt(context),
+      userPrompt: context.user_input,
       temperature: 0, // CRITICAL: Deterministic
-      messages: [
-        {
-          role: "user",
-          content: buildClaudePrompt(context),
-        },
-      ],
+      maxTokens: 1024,
+      jsonMode: true, // CRITICAL: Force JSON output
     });
 
-    const rawText = response.content[0].type === "text" ? response.content[0].text : "";
+    const rawText = response.content;
 
-    console.log(`🤖 [CLAUDE] Raw response: ${rawText}`);
+    console.log("ONBOARDING_EXTRACTION", {
+      provider: "openai",
+      input: context.user_input,
+      result: rawText,
+    });
 
     // Parse JSON
-    const parsed: ClaudeResponse = JSON.parse(rawText);
+    const parsed: ExtractionResponse = JSON.parse(rawText);
 
-    console.log(`✅ [CLAUDE] Parsed action: ${parsed.action}`);
-    console.log(`✅ [CLAUDE] Next state: ${parsed.next_state || "null"}`);
+    console.log(`✅ [OPENAI] Parsed action: ${parsed.action}`);
+    console.log(`✅ [OPENAI] Next state: ${parsed.next_state || "null"}`);
 
     return parsed;
   } catch (error) {
-    console.error("❌ [CLAUDE] Extraction failed:", error);
+    console.error("❌ [OPENAI] Extraction failed:", error);
 
-    // Return ERROR response
+    // HARDENING: Return REJECT instead of ERROR (allows retry)
     return {
-      action: "ERROR",
-      reply: "System error. Please try again.",
+      action: "REJECT",
+      reply: CANONICAL_REPLIES[context.state]?.["REJECT"]?.[0] || "Please try again.",
       extracted: null,
       next_state: null,
     };
@@ -331,28 +339,28 @@ async function extractWithClaude(context: OnboardingContext): Promise<ClaudeResp
 
 function enforceReplyWhitelist(
   currentState: OnboardingStateValue,
-  action: ClaudeAction,
-  claudeReply: string
+  action: ExtractionAction,
+  extractedReply: string
 ): string {
   const whitelist = CANONICAL_REPLIES[currentState]?.[action];
 
   if (!whitelist || whitelist.length === 0) {
     console.warn(`⚠️ [WHITELIST] No whitelist for ${currentState}:${action} — allowing reply`);
-    return claudeReply;
+    return extractedReply;
   }
 
-  const isWhitelisted = whitelist.some((allowed) => claudeReply.trim() === allowed.trim());
+  const isWhitelisted = whitelist.some((allowed) => extractedReply.trim() === allowed.trim());
 
   if (isWhitelisted) {
     console.log(`✅ [WHITELIST] Reply is canonical`);
-    return claudeReply;
+    return extractedReply;
   }
 
   // NON-CANONICAL REPLY DETECTED - REPLACE
   console.error(`❌ [WHITELIST] VIOLATION DETECTED`);
   console.error(`   State: ${currentState}`);
   console.error(`   Action: ${action}`);
-  console.error(`   Claude reply: "${claudeReply}"`);
+  console.error(`   LLM reply: "${extractedReply}"`);
   console.error(`   Expected one of: ${JSON.stringify(whitelist)}`);
 
   const canonicalReply = whitelist[0];
@@ -490,7 +498,7 @@ export async function handleOnboardingSms(params: {
       return { reply: "" };
     }
 
-    // 3. INVOKE CLAUDE (Zero history, temp=0)
+    // 3. INVOKE OPENAI (Zero history, temp=0)
     const context: OnboardingContext = {
       mode: "ONBOARDING",
       state: state.currentState as OnboardingStateValue,
@@ -498,29 +506,29 @@ export async function handleOnboardingSms(params: {
       user_input: userInput,
     };
 
-    const claudeResponse = await extractWithClaude(context);
+    const extractionResponse = await extractWithOpenAI(context);
 
     // 4. VALIDATE RESPONSE SCHEMA
-    if (!claudeResponse.action || !claudeResponse.reply) {
-      throw new Error("Invalid Claude response: missing required fields");
+    if (!extractionResponse.action || !extractionResponse.reply) {
+      throw new Error("Invalid extraction response: missing required fields");
     }
 
     // 5. ENFORCE REPLY WHITELIST (HARD - REPLACE)
     const validatedReply = enforceReplyWhitelist(
       state.currentState as OnboardingStateValue,
-      claudeResponse.action,
-      claudeResponse.reply
+      extractionResponse.action,
+      extractionResponse.reply
     );
 
     // 6. NORMALIZE EXTRACTED FIELDS (Server-side)
     const normalizedFields = normalizeExtractedFields(
       state.currentState as OnboardingStateValue,
-      claudeResponse.extracted
+      extractionResponse.extracted
     );
 
     // 7. UPDATE STATE ATOMICALLY
-    if (claudeResponse.action === "ACCEPT" || claudeResponse.action === "COMPLETE") {
-      const nextState = claudeResponse.action === "COMPLETE" ? "COMPLETE" : claudeResponse.next_state;
+    if (extractionResponse.action === "ACCEPT" || extractionResponse.action === "COMPLETE") {
+      const nextState = extractionResponse.action === "COMPLETE" ? "COMPLETE" : extractionResponse.next_state;
 
       if (!nextState) {
         throw new Error("Invalid state transition: next_state is null for ACCEPT action");
@@ -537,12 +545,12 @@ export async function handleOnboardingSms(params: {
             ...normalizedFields,
           },
           lastMessageSid: messageSid,
-          completedAt: claudeResponse.action === "COMPLETE" ? new Date() : null,
+          completedAt: extractionResponse.action === "COMPLETE" ? new Date() : null,
         },
       });
 
       console.log(`✅ [ONBOARDING] State updated successfully`);
-    } else if (claudeResponse.action === "REJECT") {
+    } else if (extractionResponse.action === "REJECT") {
       // Update lastMessageSid for idempotency, but don't advance state
       await prisma.onboardingState.update({
         where: { id: state.id },
@@ -552,7 +560,7 @@ export async function handleOnboardingSms(params: {
       });
 
       console.log(`⚠️ [ONBOARDING] Input rejected — state unchanged`);
-    } else if (claudeResponse.action === "ERROR") {
+    } else if (extractionResponse.action === "ERROR") {
       // Update lastMessageSid for idempotency
       await prisma.onboardingState.update({
         where: { id: state.id },
@@ -561,7 +569,7 @@ export async function handleOnboardingSms(params: {
         },
       });
 
-      console.error(`❌ [ONBOARDING] Claude returned ERROR`);
+      console.error(`❌ [ONBOARDING] LLM returned ERROR`);
     }
 
     console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");

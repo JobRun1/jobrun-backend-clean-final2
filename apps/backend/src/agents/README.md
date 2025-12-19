@@ -312,8 +312,7 @@ Required environment variables:
 # Database
 DATABASE_URL="postgresql://..."
 
-# LLM Providers
-ANTHROPIC_API_KEY="sk-ant-..."
+# LLM Provider
 OPENAI_API_KEY="sk-..."
 
 # Twilio (for message sending)
