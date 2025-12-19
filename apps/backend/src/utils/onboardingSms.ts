@@ -10,23 +10,16 @@
 import { getTwilioClient } from "../twilio/client";
 
 /**
- * The one and only onboarding message
+ * The one and only onboarding message (SHORT VERSION - CANONICAL)
  */
-export const ONBOARDING_MESSAGE = `Thanks for calling 👋
+export const ONBOARDING_MESSAGE = `Welcome to JobRun 👋
 
-JobRun helps service businesses stop losing jobs from missed calls.
+To set this up, reply with:
 
-When someone can't get through, JobRun:
-• Texts them back instantly
-• Collects job details and urgency
-• Alerts you in real time
-
-To see how it works or start onboarding, reply with:
-BUSINESS – what you do
-AREA – where you operate
+your service + your location
 
 Example:
-Emergency plumber in Leeds`;
+Plumber from London`;
 
 /**
  * Send the canonical onboarding SMS
@@ -45,10 +38,16 @@ export async function sendOnboardingSms(
     throw new Error("TWILIO_NUMBER not configured");
   }
 
-  // Production verification marker
-  console.log("🚀 [ONBOARDING-V2] NEW canonical onboarding SMS active");
-
   const client = getTwilioClient();
+
+  // 🚨 DEPLOYMENT PROOF — REMOVE AFTER VERIFICATION
+  throw new Error("ONBOARDING_SMS_ASSERTION_SHORT_V1_DEPLOYED");
+
+  // If this line ever executes, the assertion failed
+  console.log("ONBOARDING_SMS_SENT", {
+    to,
+    version: "SHORT_V1",
+  });
 
   const message = await client.messages.create({
     to,
@@ -56,7 +55,7 @@ export async function sendOnboardingSms(
     body: ONBOARDING_MESSAGE,
   });
 
-  console.log(`📩 Onboarding SMS sent to ${to} (SID: ${message.sid})`);
+  console.log(`✅ Onboarding SMS sent to ${to} (SID: ${message.sid})`);
 
   return message.sid;
 }
