@@ -47,6 +47,13 @@ export async function sendOnboardingSms(
     timestamp: new Date().toISOString(),
   });
 
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  // 🚨 FORENSIC LOGGING - Identify alert spam source
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  console.error("🚨🚨🚨 TWILIO SEND EXECUTED FROM:", __filename);
+  console.error("🚨 STACK TRACE:", new Error().stack);
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
   const message = await client.messages.create({
     to,
     from: twilioNumber,

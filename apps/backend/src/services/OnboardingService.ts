@@ -11,8 +11,35 @@
  */
 
 import { prisma } from "../db";
-import { Customer, OnboardingState } from "@prisma/client";
+import { Client, OnboardingState, ClientBilling } from "@prisma/client";
 import { LLMClient } from "../llm/LLMClient";
+import { allocateTwilioNumber } from "./TwilioNumberPoolService";
+import { OpenAIFailureTracker } from "./OpenAIFailureTracker";
+import { getPaymentActivationMessage, getTrialUsedMessage } from "../messaging/paymentMessaging";
+import { isPaymentValid } from "../utils/billingUtils";
+
+// Type for Client with billing relation
+type ClientWithBilling = Client & {
+  billing: ClientBilling | null;
+};
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+//  PHONE NUMBER NORMALIZATION
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+function normalizePhoneNumber(input?: string): string | null {
+  if (!input) return null;
+
+  // Remove all non-digit characters
+  let normalized = input.replace(/\D/g, "");
+
+  // Convert UK national format (07...) to international (447...)
+  if (normalized.startsWith("0")) {
+    normalized = "44" + normalized.substring(1);
+  }
+
+  return normalized;
+}
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 //  TYPES
@@ -24,6 +51,10 @@ type OnboardingStateValue =
   | "S3_OWNER_NAME"
   | "S4_NOTIFICATION_PREF"
   | "S5_CONFIRM_LIVE"
+  | "S6_PHONE_TYPE"
+  | "S7_FWD_SENT"
+  | "S8_FWD_CONFIRM"
+  | "S9_TEST_CALL"
   | "COMPLETE";
 
 type ExtractionAction = "ACCEPT" | "REJECT" | "COMPLETE" | "ERROR";
@@ -66,10 +97,34 @@ const CANONICAL_REPLIES: Record<OnboardingStateValue, Record<string, string[]>> 
     REJECT: ["Please reply SMS."],
   },
   S5_CONFIRM_LIVE: {
-    COMPLETE: [
-      "JobRun is now live.\n\nIf you miss a call, I'll handle the text conversation and send you the details here.",
+    ACCEPT: [
+      "Perfect! Last step to go live 🚀\n\nWhich phone do you use for your business?\n\nReply with:\n1 = iPhone\n2 = Android\n3 = Landline/Office phone\n\nThis takes 60 seconds.",
     ],
     REJECT: ["Reply YES to activate JobRun."],
+  },
+  S6_PHONE_TYPE: {
+    ACCEPT: [
+      "Great! Setting up call forwarding now...",
+    ],
+    REJECT: ["Hmm, I didn't catch that.\n\nReply with just the number:\n1 = iPhone\n2 = Android\n3 = Landline"],
+  },
+  S7_FWD_SENT: {
+    ACCEPT: [
+      "Great! Let's test it.\n\n📞 Call your business number from another phone\n⏱️ Let it ring 5+ times (don't answer!)\n📲 You should get a text from JobRun\n\nTry it now. I'll wait here.",
+    ],
+    REJECT: ["Please reply DONE once you've completed the setup."],
+  },
+  S8_FWD_CONFIRM: {
+    ACCEPT: [
+      "Waiting for your test call...",
+    ],
+    REJECT: ["Please make your test call and let it ring."],
+  },
+  S9_TEST_CALL: {
+    ACCEPT: [
+      "Test call detected! Verifying...",
+    ],
+    REJECT: ["Still waiting for missed call."],
   },
   COMPLETE: {},
 };
@@ -142,7 +197,29 @@ S4_NOTIFICATION_PREF
 S5_CONFIRM_LIVE
   • expects: confirm_live
   • ONLY valid value: "YES"
-  • action MUST be COMPLETE
+  • next_state: S6_PHONE_TYPE
+
+S6_PHONE_TYPE
+  • expects: phone_type
+  • Valid values: "IPHONE", "ANDROID", "LANDLINE"
+  • Matches: "1" / "iphone" → "IPHONE", "2" / "android" → "ANDROID", "3" / "landline" / "office" → "LANDLINE"
+  • next_state: S7_FWD_SENT
+
+S7_FWD_SENT
+  • expects: forwarding_done
+  • ONLY valid value: "DONE"
+  • Matches: "done", "ready", "set", "complete", "finished", "yes"
+  • next_state: S8_FWD_CONFIRM
+
+S8_FWD_CONFIRM
+  • expects: test_call_ready
+  • This state waits for user confirmation they're ready to test
+  • Auto-advanced by system when test call detected
+  • next_state: S9_TEST_CALL (auto-advanced by /voice webhook)
+
+S9_TEST_CALL
+  • Auto-advanced by system when missed call detected
+  • next_state: COMPLETE (auto-advanced by /status webhook)
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 OUTPUT SCHEMA (STRICT)
@@ -182,8 +259,24 @@ S4_NOTIFICATION_PREF
   • REJECT: "Please reply SMS."
 
 S5_CONFIRM_LIVE
-  • COMPLETE: "JobRun is now live.\\n\\nIf you miss a call, I'll handle the text conversation and send you the details here."
+  • ACCEPT: "Perfect! Last step to go live 🚀\\n\\nWhich phone do you use for your business?\\n\\nReply with:\\n1 = iPhone\\n2 = Android\\n3 = Landline/Office phone\\n\\nThis takes 60 seconds."
   • REJECT: "Reply YES to activate JobRun."
+
+S6_PHONE_TYPE
+  • ACCEPT: "Great! Setting up call forwarding now..."
+  • REJECT: "Hmm, I didn't catch that.\\n\\nReply with just the number:\\n1 = iPhone\\n2 = Android\\n3 = Landline"
+
+S7_FWD_SENT
+  • ACCEPT: "Great! Let's test it.\\n\\n📞 Call your business number from another phone\\n⏱️ Let it ring 5+ times (don't answer!)\\n📲 You should get a text from JobRun\\n\\nTry it now. I'll wait here."
+  • REJECT: "Please reply DONE once you've completed the setup."
+
+S8_FWD_CONFIRM
+  • ACCEPT: "Waiting for your test call..."
+  • REJECT: "Please make your test call and let it ring."
+
+S9_TEST_CALL
+  • ACCEPT: "Test call detected! Verifying..."
+  • REJECT: "Still waiting for missed call."
 
 ERROR (ANY STATE)
   "System error. Please try again."
@@ -214,6 +307,16 @@ notification_preference:
 confirm_live:
   • MUST be "YES"
 
+phone_type:
+  • Map: "1" / "iphone" → "IPHONE"
+  • Map: "2" / "android" → "ANDROID"
+  • Map: "3" / "landline" / "office" → "LANDLINE"
+  • Uppercase result
+
+forwarding_done:
+  • Map: "done" / "ready" / "set" / "complete" / "finished" / "yes" → "DONE"
+  • Uppercase result
+
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 CRITICAL BEHAVIOR RULES (THIS FIXES YOUR BUG)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -243,6 +346,8 @@ REJECT only if:
 • Input is vague or incomplete at S1
 • At S4 input ≠ "SMS"
 • At S5 input ≠ "YES"
+• At S6 input not in ["1", "2", "3", "iphone", "android", "landline", "office"]
+• At S7 input not in ["done", "ready", "set", "complete", "finished", "yes"]
 
 Do NOT advance state on REJECT.
 
@@ -319,9 +424,16 @@ async function extractWithOpenAI(context: OnboardingContext): Promise<Extraction
     console.log(`✅ [OPENAI] Parsed action: ${parsed.action}`);
     console.log(`✅ [OPENAI] Next state: ${parsed.next_state || "null"}`);
 
+    // Track successful extraction
+    OpenAIFailureTracker.recordSuccess();
+
     return parsed;
   } catch (error) {
     console.error("❌ [OPENAI] Extraction failed:", error);
+
+    // Track failure for alerting
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    OpenAIFailureTracker.recordFailure(errorMessage);
 
     // HARDENING: Return REJECT instead of ERROR (allows retry)
     return {
@@ -419,9 +531,73 @@ function normalizeExtractedFields(
     normalized.confirm_live = "YES";
   }
 
+  // S6: phone_type (map to IPHONE/ANDROID/LANDLINE)
+  if (currentState === "S6_PHONE_TYPE") {
+    if (extracted.phone_type) {
+      normalized.phone_type = extracted.phone_type.toUpperCase();
+    }
+  }
+
+  // S7: forwarding_done (MUST be "DONE")
+  if (currentState === "S7_FWD_SENT") {
+    normalized.forwarding_done = "DONE";
+  }
+
+  // S8 & S9: Auto-advanced by webhooks (no extraction needed)
+
   console.log(`🔧 [NORMALIZE] Normalized fields:`, normalized);
 
   return normalized;
+}
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+//  FORWARDING INSTRUCTIONS GENERATOR
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+function generateForwardingInstructions(phoneType: string, twilioNumber: string): string {
+  // Format Twilio number for display (assumes E.164 format like +447123456789)
+  const formattedNumber = twilioNumber.startsWith("+") ? twilioNumber : `+${twilioNumber}`;
+
+  if (phoneType === "IPHONE") {
+    return `📱 iPhone Setup (30 seconds)
+
+1. Open Phone app
+2. Tap your profile (top right)
+3. Scroll to "Call Forwarding"
+4. Enable "When Busy or Unanswered"
+5. Enter this number:
+   ${formattedNumber}
+
+Done? Reply DONE`;
+  }
+
+  if (phoneType === "ANDROID") {
+    return `📱 Android Setup (30 seconds)
+
+1. Open Phone app
+2. Tap ⋮ (3 dots) → Settings
+3. Tap "Call forwarding"
+4. Tap "When unanswered"
+5. Enter this number:
+   ${formattedNumber}
+
+Done? Reply DONE`;
+  }
+
+  if (phoneType === "LANDLINE") {
+    return `📞 Landline Setup
+
+Call your phone provider and ask to enable:
+
+"Conditional call forwarding for unanswered calls to: ${formattedNumber}"
+
+Most providers do this free over the phone.
+
+Once done, reply DONE`;
+  }
+
+  // Fallback (shouldn't happen with proper validation)
+  return `Please set up call forwarding to: ${formattedNumber}\n\nReply DONE when complete.`;
 }
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -429,7 +605,7 @@ function normalizeExtractedFields(
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 async function checkIdempotency(
-  customerId: string,
+  clientId: string,
   messageSid: string
 ): Promise<boolean> {
   // TIER 1: Redis check (fast path) — NOT IMPLEMENTED YET
@@ -437,7 +613,7 @@ async function checkIdempotency(
 
   // TIER 2: Database check (fallback)
   const state = await prisma.onboardingState.findUnique({
-    where: { customerId },
+    where: { clientId },
   });
 
   if (state && state.lastMessageSid === messageSid) {
@@ -453,22 +629,37 @@ async function checkIdempotency(
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 export async function handleOnboardingSms(params: {
-  customer: Customer;
+  client: ClientWithBilling;
+  fromPhone: string;
   userInput: string;
   messageSid: string;
 }): Promise<{ reply: string }> {
-  const { customer, userInput, messageSid } = params;
+  const { client, fromPhone, userInput, messageSid } = params;
 
   console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
   console.log("🔒 [ONBOARDING] HANDLER START");
-  console.log(`   Customer: ${customer.phone}`);
+  console.log(`   Client: ${client.id} (${client.businessName})`);
+  console.log(`   From: ${fromPhone}`);
   console.log(`   Input: "${userInput}"`);
   console.log(`   MessageSid: ${messageSid}`);
   console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
 
   try {
+    // 0. OWNER PHONE VALIDATION (CRITICAL)
+    // Onboarding is driven by SMS FROM client.phoneNumber only
+    const normalizedFrom = normalizePhoneNumber(fromPhone);
+    const normalizedOwner = normalizePhoneNumber(client.phoneNumber || "");
+
+    if (!normalizedOwner || normalizedFrom !== normalizedOwner) {
+      console.log("❌ [ONBOARDING] SMS not from client owner — ignoring");
+      console.log(`   From: ${normalizedFrom}, Owner: ${normalizedOwner}`);
+      return { reply: "" }; // Silently ignore non-owner messages
+    }
+
+    console.log("✅ [ONBOARDING] Owner phone validated");
+
     // 1. IDEMPOTENCY CHECK
-    const alreadyProcessed = await checkIdempotency(customer.id, messageSid);
+    const alreadyProcessed = await checkIdempotency(client.id, messageSid);
     if (alreadyProcessed) {
       console.log("⚠️ [ONBOARDING] Message already processed — returning 200 without reply");
       return { reply: "" }; // Return empty to prevent duplicate SMS
@@ -476,14 +667,14 @@ export async function handleOnboardingSms(params: {
 
     // 2. LOAD OR CREATE STATE
     let state = await prisma.onboardingState.findUnique({
-      where: { customerId: customer.id },
+      where: { clientId: client.id },
     });
 
     if (!state) {
-      console.log("📝 [ONBOARDING] Creating new onboarding state for customer");
+      console.log("📝 [ONBOARDING] Creating new onboarding state for client");
       state = await prisma.onboardingState.create({
         data: {
-          customerId: customer.id,
+          clientId: client.id,
           currentState: "S1_BUSINESS_TYPE_LOCATION",
           collectedFields: {},
         },
@@ -536,20 +727,187 @@ export async function handleOnboardingSms(params: {
 
       console.log(`📍 [ONBOARDING] State transition: ${state.currentState} → ${nextState}`);
 
+      // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+      // PAYMENT GATE: Check trial eligibility and payment (PHASE 2A)
+      // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+      if (state.currentState === "S5_CONFIRM_LIVE" && nextState === "S6_PHONE_TYPE") {
+        console.log("💳 [PAYMENT_GATE] Checking trial eligibility and payment status");
+
+        // ═══════════════════════════════════════════════════════════════════════
+        // GATE 1: TRIAL ELIGIBILITY CHECK (REMOVED - Field doesn't exist in DB)
+        // TODO: Re-implement trial tracking via separate table if needed
+        // ═══════════════════════════════════════════════════════════════════════
+
+        console.log("✅ [PAYMENT_GATE] Trial eligibility check (currently disabled)");
+
+        // ═══════════════════════════════════════════════════════════════════════
+        // GATE 2: PAYMENT STATUS CHECK
+        // ═══════════════════════════════════════════════════════════════════════
+        if (!client.billing || !isPaymentValid(client.billing.status)) {
+          console.log("❌ [PAYMENT_GATE] Payment not active - showing trial signup");
+
+          // Update lastMessageSid for idempotency, but DO NOT advance state
+          await prisma.onboardingState.update({
+            where: { id: state.id },
+            data: {
+              lastMessageSid: messageSid,
+            },
+          });
+
+          const paymentMessage = getPaymentActivationMessage();
+
+          console.log("💳 [PAYMENT_GATE] Sending payment message");
+          console.log("PAYMENT_REQUIRED", {
+            clientId: client.id,
+            ownerPhone: client.phoneNumber,
+            timestamp: new Date().toISOString(),
+          });
+
+          console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+          console.log("⚠️  [ONBOARDING] BLOCKED BY PAYMENT GATE");
+          console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+
+          return { reply: paymentMessage };
+        }
+
+        console.log("✅ [PAYMENT_GATE] Payment active - allocating Twilio number");
+
+        // Allocate Twilio number from pool
+        const allocationResult = await allocateTwilioNumber(client.id);
+
+        if (!allocationResult.success) {
+          console.error("❌ [PAYMENT_GATE] Number allocation failed:", allocationResult.reason);
+
+          // Update lastMessageSid for idempotency, but DO NOT advance state
+          await prisma.onboardingState.update({
+            where: { id: state.id },
+            data: {
+              lastMessageSid: messageSid,
+            },
+          });
+
+          let errorMessage: string;
+
+          if (allocationResult.reason === "POOL_EMPTY") {
+            errorMessage = `We're currently at capacity.
+
+Your payment is confirmed, and you're on our priority list.
+
+We'll text you within 24 hours when your JobRun number is ready.`;
+
+            console.log("POOL_EMPTY_DURING_ONBOARDING", {
+              clientId: client.id,
+              ownerPhone: client.phoneNumber,
+              timestamp: new Date().toISOString(),
+            });
+          } else {
+            errorMessage = `There was an issue assigning your JobRun number.
+
+Don't worry - your payment is safe.
+
+Reply READY to try again, or we'll reach out shortly.`;
+          }
+
+          console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+          console.log("⚠️  [ONBOARDING] BLOCKED BY ALLOCATION FAILURE");
+          console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+
+          return { reply: errorMessage };
+        }
+
+        console.log("✅ [PAYMENT_GATE] Number allocated:", allocationResult.phoneE164);
+        console.log("NUMBER_ALLOCATED", {
+          clientId: client.id,
+          phoneE164: allocationResult.phoneE164,
+          ownerPhone: client.phoneNumber,
+          timestamp: new Date().toISOString(),
+        });
+
+        // Refresh client to get updated twilioNumber
+        const updatedClient = await prisma.client.findUnique({
+          where: { id: client.id },
+        });
+
+        if (updatedClient) {
+          // Update the client object reference for use in forwarding instructions later
+          Object.assign(client, updatedClient);
+        }
+      }
+
+      // Special handling for S6_PHONE_TYPE: Store phoneType in dedicated field
+      const updateData: any = {
+        currentState: nextState as OnboardingStateValue,
+        collectedFields: {
+          ...(state.collectedFields as Record<string, any>),
+          ...normalizedFields,
+        },
+        lastMessageSid: messageSid,
+        completedAt: extractionResponse.action === "COMPLETE" ? new Date() : null,
+      };
+
+      if (state.currentState === "S6_PHONE_TYPE" && normalizedFields.phone_type) {
+        updateData.phoneType = normalizedFields.phone_type;
+        console.log(`📱 [ONBOARDING] Storing phone type: ${normalizedFields.phone_type}`);
+      }
+
       await prisma.onboardingState.update({
         where: { id: state.id },
-        data: {
-          currentState: nextState as OnboardingStateValue,
-          collectedFields: {
-            ...(state.collectedFields as Record<string, any>),
-            ...normalizedFields,
-          },
-          lastMessageSid: messageSid,
-          completedAt: extractionResponse.action === "COMPLETE" ? new Date() : null,
-        },
+        data: updateData,
       });
 
       console.log(`✅ [ONBOARDING] State updated successfully`);
+
+      // SPECIAL CASE: When transitioning from S6_PHONE_TYPE to S7_FWD_SENT,
+      // replace the reply with forwarding instructions
+      if (state.currentState === "S6_PHONE_TYPE" && nextState === "S7_FWD_SENT" && normalizedFields.phone_type) {
+        // CRITICAL: Must have assigned Twilio number before sending forwarding instructions
+        if (!client.twilioNumber) {
+          console.error("❌ [ONBOARDING] CRITICAL: Twilio number missing at forwarding step");
+          console.error("ONBOARDING_BLOCKED_NO_TWILIO_NUMBER", {
+            clientId: client.id,
+            ownerPhone: client.phoneNumber,
+            currentState: state.currentState,
+            nextState,
+            timestamp: new Date().toISOString(),
+          });
+
+          // Rollback state transition - stay at S6_PHONE_TYPE
+          await prisma.onboardingState.update({
+            where: { id: state.id },
+            data: {
+              currentState: "S6_PHONE_TYPE",
+              lastMessageSid: messageSid,
+            },
+          });
+
+          const retryMessage = `We're assigning your JobRun number now.
+
+This usually takes a moment.
+
+Reply READY in 1 minute to continue.`;
+
+          console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+          console.log("⚠️  [ONBOARDING] BLOCKED - NO TWILIO NUMBER");
+          console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+
+          return { reply: retryMessage };
+        }
+
+        // Number exists - send forwarding instructions
+        const forwardingInstructions = generateForwardingInstructions(
+          normalizedFields.phone_type,
+          client.twilioNumber
+        );
+
+        console.log("📲 [ONBOARDING] Sending forwarding instructions");
+        console.log(`   Client Twilio Number: ${client.twilioNumber}`);
+        console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+        console.log("✅ [ONBOARDING] HANDLER COMPLETE");
+        console.log(`   Reply: "${forwardingInstructions}"`);
+        console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+
+        return { reply: forwardingInstructions };
+      }
     } else if (extractionResponse.action === "REJECT") {
       // Update lastMessageSid for idempotency, but don't advance state
       await prisma.onboardingState.update({

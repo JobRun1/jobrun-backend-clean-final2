@@ -16,6 +16,13 @@ import {
   markClarificationAsked,
   markEscalated,
 } from "../../services/vault";
+import {
+  classifyIntentDeterministic,
+  extractEntitiesDeterministic,
+  generateReplyDeterministic,
+  logDeterministicFallback,
+} from "../../services/DeterministicFallback";
+import { shouldUseAI, canProcessBookingRequest, canProcessNotificationRequest } from "../../services/SystemGate";
 
 export interface HandleInboundSmsParams {
   client: Client;
@@ -55,8 +62,23 @@ export async function handleInboundSms(
     const context = { messages: messages.reverse() };
     console.log(`✅ VAULT: Loaded ${context.messages.length} messages`);
 
-    console.log("1️⃣ SENTINEL: Running safety guard on inbound message...");
-    const sentinelResult = await runSentinelGuard({
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    // SYSTEMGATE: Should Use AI?
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    // Centralized guard check - replaces inline aiDisabled check
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    const aiGuard = shouldUseAI(client);
+    const useAI = aiGuard.allowed;
+
+    if (!useAI) {
+      console.warn(`[SystemGate] AI_DISABLED: ${aiGuard.reason}`);
+      logDeterministicFallback('aiDisabled flag set', client.id);
+    }
+
+    // SENTINEL: Skip if AI disabled (no LLM-based safety checks in deterministic mode)
+    if (useAI) {
+      console.log("1️⃣ SENTINEL: Running safety guard on inbound message...");
+      const sentinelResult = await runSentinelGuard({
       clientId: client.id,
       lead: customer as any, // SENTINEL still expects old format, will be fixed separately
       messageText: inboundMessage.body,
@@ -78,7 +100,10 @@ export async function handleInboundSms(
       // CRITICAL: Throw to trigger HTTP 500 and Twilio retry
       throw new Error(`Inbound message blocked by safety guard: ${sentinelResult.reason}`);
     }
-    console.log("✅ SENTINEL: Message passed safety checks");
+      console.log("✅ SENTINEL: Message passed safety checks");
+    } else {
+      console.log("⚠️ SENTINEL: SKIPPED (AI disabled - deterministic mode)");
+    }
 
     console.log("2️⃣ VAULT: Get or create lead...");
     let lead = await getOrCreateLead({
@@ -87,19 +112,25 @@ export async function handleInboundSms(
     });
     console.log(`✅ VAULT: Lead ${lead.id} (state: ${lead.state})`);
 
-    console.log("3️⃣ DIAL: Classifying intent...");
-    const intentResult = await classifyIntent({
-      text: inboundMessage.body,
-      context: context.messages,
-    });
+    // DIAL: Use AI or deterministic classification based on useAI flag
+    console.log(`3️⃣ DIAL: Classifying intent (${useAI ? 'AI' : 'DETERMINISTIC'})...`);
+    const intentResult = useAI
+      ? await classifyIntent({
+          text: inboundMessage.body,
+          context: context.messages,
+        })
+      : classifyIntentDeterministic(inboundMessage.body);
     console.log(`✅ DIAL: Intent = ${intentResult.intent} (confidence: ${intentResult.confidence.toFixed(2)})`);
 
-    console.log("4️⃣ FLOW: Extracting entities...");
-    const entities = await extractEntities({
-      text: inboundMessage.body,
-      context: context.messages,
-      intent: intentResult.intent,
-    });
+    // FLOW: Use AI or deterministic extraction based on useAI flag
+    console.log(`4️⃣ FLOW: Extracting entities (${useAI ? 'AI' : 'DETERMINISTIC'})...`);
+    const entities = useAI
+      ? await extractEntities({
+          text: inboundMessage.body,
+          context: context.messages,
+          intent: intentResult.intent,
+        })
+      : extractEntitiesDeterministic(inboundMessage.body);
     console.log(`✅ FLOW: Extracted entities:`, entities);
 
     console.log("5️⃣ RUNE: Deciding next action...");
@@ -111,6 +142,18 @@ export async function handleInboundSms(
       "bookingUrl" in clientSettings.metadata &&
       clientSettings.metadata.bookingUrl
     );
+
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    // SYSTEMGATE: Can Send Booking Link?
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    // Centralized guard check - replaces inline onboarding check
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    const bookingGuard = canProcessBookingRequest(client, hasBookingUrl);
+    const bookingLinkAllowed = bookingGuard.allowed;
+
+    if (hasBookingUrl && !bookingGuard.allowed) {
+      console.warn(`[SystemGate] BOOKING_BLOCKED: ${bookingGuard.reason}`);
+    }
 
     const runeInput: RuneInput = {
       intent: intentResult.intent,
@@ -125,7 +168,7 @@ export async function handleInboundSms(
         confidence: intentResult.confidence,
       },
       config: {
-        booking_link_enabled: hasBookingUrl,
+        booking_link_enabled: bookingLinkAllowed,
       },
     };
 
@@ -156,35 +199,57 @@ export async function handleInboundSms(
 
     console.log(`✅ VAULT: State = ${lead.state}, Flags = { sentBooking: ${lead.sentBooking}, askedClarify: ${lead.askedClarify}, escalated: ${lead.escalated} }`);
 
-    console.log("7️⃣ LYRA: Generating reply...");
+    // LYRA: Use AI or deterministic reply generation based on useAI flag
+    console.log(`7️⃣ LYRA: Generating reply (${useAI ? 'AI' : 'DETERMINISTIC'})...`);
 
-    const replyMessage = await generateReply({
-      clientSettings,
-      action: decision.action,
-      entities,
-      recentMessages: context.messages,
-      businessName: client.businessName,
-    });
+    const replyMessage = useAI
+      ? await generateReply({
+          clientSettings,
+          action: decision.action,
+          entities,
+          recentMessages: context.messages,
+          businessName: client.businessName,
+        })
+      : generateReplyDeterministic(
+          decision.action as any,
+          client.businessName,
+          clientSettings?.metadata && typeof clientSettings.metadata === 'object' && 'bookingUrl' in clientSettings.metadata
+            ? (clientSettings.metadata as any).bookingUrl
+            : undefined,
+          entities as any
+        );
 
     // URGENT ALERT: Send notification if action is SEND_BOOKING_AND_ALERT
     if (decision.action === "SEND_BOOKING_AND_ALERT") {
-      console.log("🚨 ALERT: Urgent lead detected - sending notification...");
-      try {
-        const dashboardLink = `${process.env.FRONTEND_URL || "https://app.jobrun.com"}/admin/messages?leadId=${lead.id}`;
-        await NotificationService.sendHandoverNotification(client.id, {
-          conversationId: lead.id,
-          customerName: customer.name || undefined,
-          customerPhone: customer.phone,
-          lastMessages: context.messages.slice(-3).map((m) => m.body),
-          urgencyScore: 100,
-          urgencyLevel: "HIGH",
-          reason: `Urgent ${runeInput.flow.job_type || "issue"}: ${runeInput.flow.urgency_description || "immediate attention needed"}`,
-          triggers: [decision.reason],
-          dashboardLink,
-        });
-        console.log("✅ ALERT: Notification sent successfully");
-      } catch (err) {
-        console.error("❌ ALERT: Failed to send notification:", err);
+      console.log("🚨 ALERT: Urgent lead detected - checking notification eligibility...");
+
+      // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+      // SYSTEMGATE: Can Send Notification?
+      // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+      // Centralized guard check - replaces inline onboarding check
+      // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+      const notificationGuard = canProcessNotificationRequest(client, clientSettings);
+
+      if (!notificationGuard.allowed) {
+        console.warn(`[SystemGate] NOTIFICATION_BLOCKED: ${notificationGuard.reason}`);
+      } else {
+        try {
+          const dashboardLink = `${process.env.FRONTEND_URL || "https://app.jobrun.com"}/admin/messages?leadId=${lead.id}`;
+          await NotificationService.sendHandoverNotification(client.id, {
+            conversationId: lead.id,
+            customerName: customer.name || undefined,
+            customerPhone: customer.phone,
+            lastMessages: context.messages.slice(-3).map((m) => m.body),
+            urgencyScore: 100,
+            urgencyLevel: "HIGH",
+            reason: `Urgent ${runeInput.flow.job_type || "issue"}: ${runeInput.flow.urgency_description || "immediate attention needed"}`,
+            triggers: [decision.reason],
+            dashboardLink,
+          });
+          console.log("✅ ALERT: Notification sent successfully");
+        } catch (err) {
+          console.error("❌ ALERT: Failed to send notification:", err);
+        }
       }
     }
 

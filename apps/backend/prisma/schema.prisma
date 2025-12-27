@@ -30,6 +30,9 @@ model Client {
   messages         Message[]
   users            User[]
   leads            Lead[]
+  onboardingState  OnboardingState?
+  billing          ClientBilling?
+  controls         ClientControls?
 
   @@map("clients")
 }
@@ -78,7 +81,6 @@ model Customer {
   conversations    Conversation[]
   messages         Message[]
   leads            Lead[]
-  onboardingState  OnboardingState?
 
   @@unique([clientId, phone], name: "clientId_phone")
   @@index([clientId])
@@ -361,21 +363,26 @@ model HandoverState {
 
 //
 // ──────────────────────────────────────────────
-// ONBOARDING STATE (07476955179 ONLY)
+// ONBOARDING STATE (CLIENT ONBOARDING)
 // ──────────────────────────────────────────────
 model OnboardingState {
-  id               String               @id @default(cuid())
-  createdAt        DateTime             @default(now()) @map("created_at")
-  updatedAt        DateTime             @updatedAt @map("updated_at")
+  id                 String               @id @default(cuid())
+  createdAt          DateTime             @default(now()) @map("created_at")
+  updatedAt          DateTime             @updatedAt @map("updated_at")
 
-  customerId       String               @unique @map("customer_id")
-  customer         Customer             @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  clientId           String               @unique @map("client_id")
+  client             Client               @relation(fields: [clientId], references: [id], onDelete: Cascade)
 
-  currentState     OnboardingStateEnum  @default(S1_BUSINESS_TYPE_LOCATION) @map("current_state")
-  collectedFields  Json                 @default("{}") @map("collected_fields")
+  currentState       OnboardingStateEnum  @default(S1_BUSINESS_TYPE_LOCATION) @map("current_state")
+  collectedFields    Json                 @default("{}") @map("collected_fields")
 
-  lastMessageSid   String?              @map("last_message_sid")
-  completedAt      DateTime?            @map("completed_at")
+  lastMessageSid     String?              @map("last_message_sid")
+  completedAt        DateTime?            @map("completed_at")
+
+  phoneType          String?              @map("phone_type")
+  forwardingEnabled  Boolean              @default(false) @map("forwarding_enabled")
+  testCallDetected   Boolean              @default(false) @map("test_call_detected")
+  stuckDetectedAt    DateTime?            @map("stuck_detected_at")
 
   @@index([currentState])
   @@index([lastMessageSid])
@@ -465,5 +472,208 @@ enum OnboardingStateEnum {
   S3_OWNER_NAME
   S4_NOTIFICATION_PREF
   S5_CONFIRM_LIVE
+  S6_PHONE_TYPE
+  S7_FWD_SENT
+  S8_FWD_CONFIRM
+  S9_TEST_CALL
   COMPLETE
+}
+
+//
+// ──────────────────────────────────────────────
+// ALERT LOG (Ops Alerting)
+// ──────────────────────────────────────────────
+model AlertLog {
+  id          String   @id @default(cuid())
+  createdAt   DateTime @default(now()) @map("created_at")
+  alertType   String   @map("alert_type")
+  alertKey    String   @map("alert_key")
+  severity    String
+  resourceId  String?  @map("resource_id")
+  deliveredAt DateTime @map("delivered_at")
+  channel     String
+  metadata    Json?
+
+  // Phase 5: Alert Acknowledgment (append-only, no unique constraint)
+  acknowledgedAt DateTime? @map("acknowledged_at")
+  acknowledgedBy String?   @map("acknowledged_by")
+  resolution     String?
+
+  @@index([alertType])
+  @@index([alertKey])
+  @@index([deliveredAt])
+  @@index([acknowledgedAt])
+  @@map("alert_logs")
+}
+
+//
+// ──────────────────────────────────────────────
+// TWILIO NUMBER POOL
+// ──────────────────────────────────────────────
+model TwilioNumberPool {
+  id         String    @id @default(cuid())
+  createdAt  DateTime  @default(now()) @map("created_at")
+  updatedAt  DateTime  @updatedAt @map("updated_at")
+  phoneE164  String    @unique @map("phone_e164")
+  status     String    @default("AVAILABLE")
+  clientId   String?   @map("client_id")
+  assignedAt DateTime? @map("assigned_at")
+
+  @@index([status])
+  @@index([clientId])
+  @@map("twilio_number_pool")
+}
+
+//
+// ──────────────────────────────────────────────
+// CLIENT BILLING (TIER 2: COMMERCIAL TRUTH)
+// ──────────────────────────────────────────────
+model ClientBilling {
+  id        String   @id @default(cuid())
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  // Foreign key (1:1 with Client)
+  clientId  String   @unique @map("client_id")
+  client    Client   @relation(fields: [clientId], references: [id], onDelete: Cascade)
+
+  // ⚠️ DO NOT UPDATE status DIRECTLY IN CODE
+  // ⚠️ Use transitionBillingState() from billingTransitions.ts ONLY
+  // SINGLE SOURCE OF TRUTH FOR BILLING STATE
+  status           BillingStatus @default(TRIAL_PENDING) @map("status")
+  paymentSource    PaymentSource @default(NONE) @map("payment_source")
+
+  // Trial lifecycle (one-trial-per-phone enforcement)
+  trialUsedAt      DateTime?     @map("trial_used_at")
+  trialStartedAt   DateTime?     @map("trial_started_at")
+  trialEndsAt      DateTime?     @map("trial_ends_at")
+
+  // Subscription lifecycle
+  subscriptionStartedAt DateTime?  @map("subscription_started_at")
+  subscriptionEndsAt    DateTime?  @map("subscription_ends_at")
+
+  // External payment provider (nullable - manual billing exists)
+  stripeCustomerId      String?    @map("stripe_customer_id")
+  stripeSubscriptionId  String?    @map("stripe_subscription_id")
+
+  // Audit trail
+  lastBillingEventAt    DateTime?  @map("last_billing_event_at")
+  lastBillingEventType  String?    @map("last_billing_event_type")
+
+  @@index([status])
+  @@index([paymentSource])
+  @@map("client_billing")
+}
+
+//
+// ──────────────────────────────────────────────
+// CLIENT CONTROLS (TIER 2: OPERATIONAL GATES)
+// ──────────────────────────────────────────────
+model ClientControls {
+  id        String   @id @default(cuid())
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  // Foreign key (1:1 with Client)
+  clientId  String   @unique @map("client_id")
+  client    Client   @relation(fields: [clientId], references: [id], onDelete: Cascade)
+
+  // Kill switch: Emergency SMS pause
+  outboundPaused       Boolean   @default(false) @map("outbound_paused")
+  outboundPausedAt     DateTime? @map("outbound_paused_at")
+  outboundPausedReason String?   @map("outbound_paused_reason")
+
+  // Kill switch: Force deterministic fallback
+  aiDisabled           Boolean   @default(false) @map("ai_disabled")
+  aiDisabledAt         DateTime? @map("ai_disabled_at")
+  aiDisabledReason     String?   @map("ai_disabled_reason")
+
+  // Ops Alerting Control (Phase 5: Moved from Client)
+  opsAlertsMuted          Boolean   @default(false) @map("ops_alerts_muted")
+  paymentGateAlertedAt    DateTime? @map("payment_gate_alerted_at")
+  paymentGateAlertCount   Int       @default(0) @map("payment_gate_alert_count")
+
+  @@map("client_controls")
+}
+
+//
+// ──────────────────────────────────────────────
+// BILLING EVENT LOG (TIER 2: STRIPE IDEMPOTENCY)
+// ──────────────────────────────────────────────
+model BillingEvent {
+  id             String   @id @default(cuid())
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  // Client reference (for querying history)
+  clientId       String   @map("client_id")
+
+  // Stripe event deduplication
+  stripeEventId  String   @unique @map("stripe_event_id")
+  eventType      String   @map("event_type")
+
+  // Event payload (for debugging)
+  eventData      Json?    @map("event_data")
+
+  // Processing metadata
+  processedAt    DateTime @map("processed_at")
+  processingTimeMs Int?   @map("processing_time_ms")
+
+  @@index([clientId])
+  @@index([eventType])
+  @@index([processedAt])
+  @@map("billing_events")
+}
+
+//
+// ──────────────────────────────────────────────
+// BILLING ENUMS (TIER 2: EXPLICIT STATES)
+// ──────────────────────────────────────────────
+
+// Billing lifecycle state machine
+enum BillingStatus {
+  TRIAL_PENDING       // Onboarding incomplete
+  TRIAL_ACTIVE        // 7-day trial running
+  TRIAL_EXPIRED       // Trial ended, no payment
+  ACTIVE              // Paying customer
+  DELINQUENT          // Payment failed, grace period
+  CANCELED            // Explicitly canceled
+  SUSPENDED           // Admin/system suspended
+}
+
+// Payment method/source
+enum PaymentSource {
+  NONE                // No payment method attached
+  STRIPE              // Stripe subscription
+  MANUAL              // Manual invoicing (enterprise)
+  WAIVED              // Free tier (partnerships)
+}
+
+//
+// ──────────────────────────────────────────────
+// ADMIN ACTION LOG (PHASE 5: AUDIT TRAIL)
+// ──────────────────────────────────────────────
+model AdminAction {
+  id        String   @id @default(cuid())
+  createdAt DateTime @default(now()) @map("created_at")
+
+  // Who performed the action
+  adminId   String   @map("admin_id")
+
+  // Which client was affected (null for global actions)
+  clientId  String?  @map("client_id")
+
+  // What action was performed
+  action    String
+
+  // Why (operator-provided justification)
+  reason    String?
+
+  // Additional context (e.g., alertId, previous state, etc.)
+  metadata  Json?
+
+  @@index([clientId])
+  @@index([adminId])
+  @@index([createdAt])
+  @@index([action])
+  @@map("admin_actions")
 }

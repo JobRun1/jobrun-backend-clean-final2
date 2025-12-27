@@ -140,6 +140,13 @@ export async function executeTextCommand(
   const message = `Hi, this is JobRun for ${businessName}. We saw your missed call — when's a good time to talk?`;
 
   try {
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    // 🚨 FORENSIC LOGGING - Identify alert spam source
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    console.error("🚨🚨🚨 TWILIO SEND EXECUTED FROM:", __filename);
+    console.error("🚨 STACK TRACE:", new Error().stack);
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
     await twilioClient.messages.create({
       to: lead.customer.phone,
       from: twilioNumber,

@@ -107,11 +107,11 @@ export async function checkRuntimeInvariants(): Promise<HealthCheckResult> {
           actual: bookingUrl ? typeof bookingUrl : 'undefined',
           severity: 'CRITICAL',
         });
-      } else if (!isValidUrl(bookingUrl)) {
+      } else if (!isValidBookingUrl(bookingUrl)) {
         violations.push({
           invariant: 'BOOKING_URL_VALID',
-          expected: 'metadata.bookingUrl is valid URL',
-          actual: bookingUrl,
+          expected: 'metadata.bookingUrl must be "/book/<clientId>" OR "https://<domain>/book/<clientId>"',
+          actual: `"${bookingUrl}" (rejected)`,
           severity: 'CRITICAL',
         });
       } else {
@@ -138,12 +138,43 @@ export async function checkRuntimeInvariants(): Promise<HealthCheckResult> {
 }
 
 /**
- * Basic URL validation
+ * Validate booking URL for JobRun internal booking system
+ *
+ * Accepts:
+ * - Internal routes: "/book/<clientId>" (must have at least 1 char after "/book/")
+ * - Absolute URLs: "https://jobrun.app/book/<clientId>" (http or https only)
+ *
+ * Rejects:
+ * - Empty strings, whitespace-only
+ * - Routes without leading slash: "book/...", "/book", "/book/"
+ * - Non-http(s) protocols: "ftp://...", "file://..."
+ * - Any other invalid format
  */
-function isValidUrl(url: string): boolean {
+export function isValidBookingUrl(value: unknown): boolean {
+  // Must be a string
+  if (typeof value !== 'string') {
+    return false;
+  }
+
+  // Must be non-empty after trimming
+  const url = value.trim();
+  if (url.length === 0) {
+    return false;
+  }
+
+  // Case 1: Internal route path
+  if (url.startsWith('/')) {
+    // Must start with "/book/" and have at least 1 character after it
+    // Valid: "/book/abc", "/book/default-client"
+    // Invalid: "/book", "/book/", "/other/path"
+    return url.startsWith('/book/') && url.length > '/book/'.length;
+  }
+
+  // Case 2: Absolute URL
   try {
-    new URL(url);
-    return true;
+    const parsedUrl = new URL(url);
+    // Must be http or https
+    return parsedUrl.protocol === 'http:' || parsedUrl.protocol === 'https:';
   } catch {
     return false;
   }

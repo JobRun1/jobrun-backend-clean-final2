@@ -1,0 +1,121 @@
+═══════════════════════════════════════════════════════════════
+🚨 EMERGENCY ALERT GUARD DEPLOYMENT - QUICK CHECKLIST
+═══════════════════════════════════════════════════════════════
+
+STATUS: Ready to deploy
+ACTION: Follow steps EXACTLY - do not skip
+
+───────────────────────────────────────────────────────────────
+STEP 1: BUILD ✅ (Already done - verification added)
+───────────────────────────────────────────────────────────────
+
+Code changes made:
+  ✅ Emergency guard in AlertService.ts (lines 135-154)
+  ✅ Schema check method (lines 329-356)
+  ✅ Startup verification log (index.ts lines 16-23)
+
+TypeScript status: ✅ CLEAN
+
+───────────────────────────────────────────────────────────────
+STEP 2: DEPLOY NOW ⚠️ (YOUR ACTION REQUIRED)
+───────────────────────────────────────────────────────────────
+
+Run these commands:
+
+  cd apps/backend
+  npm run build
+
+Then DEPLOY using your production method:
+
+Railway:
+  git add .
+  git commit -m "emergency: deploy alert suppression guard"
+  git push origin main
+
+PM2:
+  pm2 restart jobrun-backend
+
+Docker:
+  docker build -t jobrun-backend .
+  docker restart jobrun-backend
+
+Direct:
+  npm run start
+
+───────────────────────────────────────────────────────────────
+STEP 3: VERIFY DEPLOYMENT ⚠️ (CRITICAL - DO NOT SKIP)
+───────────────────────────────────────────────────────────────
+
+Watch logs for this EXACT text within 30 seconds:
+
+  🚨 ALERT GUARD VERSION: PHASE5_EMERGENCY_GUARD_ACTIVE
+  🚨 AlertService emergency suppression is ENABLED
+
+If you DON'T see this:
+  → Old code is still running
+  → Force restart the process
+  → Check deployment status
+  → Verify build artifacts are fresh
+
+───────────────────────────────────────────────────────────────
+STEP 4: VERIFY SUPPRESSION ⚠️ (WAIT 10 MINUTES)
+───────────────────────────────────────────────────────────────
+
+Within 10 minutes, you MUST see:
+
+  ✅ [ALERT_SUPPRESSED] Phase 5 schema not deployed...
+
+You should NOT see:
+
+  ❌ [ALERT] SMS sent successfully
+  ❌ Any Twilio SIDs (SM...)
+
+Founder phone should:
+
+  ✅ Stop receiving alert SMS
+
+───────────────────────────────────────────────────────────────
+STEP 5: CLEANUP (After 10+ minutes of no alerts)
+───────────────────────────────────────────────────────────────
+
+Tell me: "remove the startup log"
+
+I will remove the temporary verification from index.ts
+
+LEAVE the emergency guard in AlertService.ts until Phase 5 migration
+
+───────────────────────────────────────────────────────────────
+TROUBLESHOOTING
+───────────────────────────────────────────────────────────────
+
+Alerts still firing?
+  1. Check startup log appeared → If NO: restart failed
+  2. Kill all node processes: pkill -9 node
+  3. Start fresh: npm run build && npm run start
+
+Can't find logs?
+  Railway: railway logs --follow
+  PM2: pm2 logs jobrun-backend
+  Docker: docker logs -f jobrun-backend
+
+Nuclear option if nothing works:
+  Remove TWILIO_AUTH_TOKEN from environment
+  (Alerts will fail silently)
+
+───────────────────────────────────────────────────────────────
+SUCCESS CRITERIA (ALL MUST BE TRUE)
+───────────────────────────────────────────────────────────────
+
+[ ] Startup log 🚨 ALERT GUARD VERSION visible
+[ ] Suppression log [ALERT_SUPPRESSED] appears within 10 min
+[ ] NO "SMS sent" messages in logs
+[ ] Founder phone quiet (no alerts)
+[ ] Backend running normally
+
+───────────────────────────────────────────────────────────────
+
+NEXT ACTION: Run STEP 2 deployment commands NOW
+
+See DEPLOYMENT_VERIFICATION.md for detailed instructions
+
+═══════════════════════════════════════════════════════════════

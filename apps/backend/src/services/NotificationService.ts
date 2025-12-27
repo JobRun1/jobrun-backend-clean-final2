@@ -7,7 +7,11 @@
  * - Includes customer info, last messages, urgency, reason
  */
 
+import { PrismaClient } from '@prisma/client';
 import { ConversationMemory } from './ConversationMemory';
+import { canProcessNotificationRequest } from './SystemGate';
+
+const prisma = new PrismaClient();
 
 export interface NotificationPayload {
   conversationId: string;
@@ -40,6 +44,34 @@ export class NotificationService {
       emailSent: false,
       errors: [],
     };
+
+    // Fetch client and client settings for guard check
+    const client = await prisma.client.findUnique({
+      where: { id: clientId },
+    });
+
+    if (!client) {
+      result.errors.push('Client not found');
+      return result;
+    }
+
+    const clientSettings = await prisma.clientSettings.findUnique({
+      where: { clientId },
+    });
+
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    // SYSTEMGATE: Can Send Notification?
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    // Centralized guard check - replaces inline notificationsPaused check
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    const notificationGuard = canProcessNotificationRequest(client, clientSettings);
+
+    if (!notificationGuard.allowed) {
+      console.warn(`[SystemGate] NOTIFICATION_BLOCKED: ${notificationGuard.reason}`);
+      console.log(`[SystemGate] Would have notified about: ${payload.reason}`);
+      result.errors.push(notificationGuard.reason || 'Notification blocked');
+      return result;
+    }
 
     // Get client notification settings
     const settings = await this.getClientNotificationSettings(clientId);
@@ -104,6 +136,13 @@ export class NotificationService {
 
     const { getTwilioClient } = await import('../twilio/client');
     const twilioClient = getTwilioClient();
+
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    // 🚨 FORENSIC LOGGING - Identify alert spam source
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    console.error("🚨🚨🚨 TWILIO SEND EXECUTED FROM:", __filename);
+    console.error("🚨 STACK TRACE:", new Error().stack);
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
     await twilioClient.messages.create({
       to: phoneNumber,

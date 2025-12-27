@@ -1,4 +1,6 @@
 import { checkRuntimeInvariants, formatViolationsForLog } from './HealthCheck';
+import { StuckClientDetector } from './StuckClientDetector';
+import { AlertService, AlertTemplates } from './AlertService';
 
 /**
  * Runtime Invariant Monitor
@@ -16,6 +18,7 @@ let monitorInterval: NodeJS.Timeout | null = null;
  * Run a single invariant check and log results
  */
 async function runInvariantCheck(): Promise<void> {
+  // Check 1: Bootstrap invariants
   const result = await checkRuntimeInvariants();
 
   if (!result.healthy) {
@@ -30,10 +33,22 @@ async function runInvariantCheck(): Promise<void> {
     console.error('This deployment is UNHEALTHY and may fail health checks.');
     console.error('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
 
+    // CRITICAL ALERT: Bootstrap invariants violated
+    await AlertService.sendCriticalAlert(
+      AlertTemplates.invariantViolation(result.violations)
+    );
+
     // Alert placeholder - can be replaced with PagerDuty/Slack/etc
     emitAlert(result.violations);
   } else {
     console.log(`✅ Runtime invariant check passed at ${result.timestamp}`);
+  }
+
+  // Check 2: Stuck client detection (production hardening)
+  try {
+    await StuckClientDetector.detectAndLog();
+  } catch (error) {
+    console.error('❌ Stuck client detection failed:', error);
   }
 }
 

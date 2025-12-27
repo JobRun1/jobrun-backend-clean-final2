@@ -1,4 +1,4 @@
-﻿-- STUB MIGRATION
+-- STUB MIGRATION
 -- This migration was already applied in production.
 -- This file exists ONLY to satisfy Prisma migration lineage checks.
 -- NO SQL SHOULD RUN FROM THIS FILE.

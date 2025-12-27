@@ -30,6 +30,14 @@ export async function sendSMS(
 ): Promise<string> {
   try {
     const client = getTwilioClient();
+
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    // 🚨 FORENSIC LOGGING - Identify alert spam source
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    console.error("🚨🚨🚨 TWILIO SEND EXECUTED FROM:", __filename);
+    console.error("🚨 STACK TRACE:", new Error().stack);
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
     const message = await client.messages.create({
       to,
       from,
