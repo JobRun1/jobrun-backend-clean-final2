@@ -18,6 +18,19 @@ let monitorInterval: NodeJS.Timeout | null = null;
  * Run a single invariant check and log results
  */
 async function runInvariantCheck(): Promise<void> {
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  // 🚨 PRODUCTION HOTFIX: Hard disable for runtime invariant alerts
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  // Root cause: Schema mismatch (clients.paymentActive missing in production)
+  // Invariants will NEVER pass until migrations complete
+  // Set DISABLE_RUNTIME_INVARIANTS=true to stop alert spam
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  if (process.env.DISABLE_RUNTIME_INVARIANTS === "true") {
+    console.warn("🚨 RUNTIME INVARIANTS DISABLED (production hotfix)");
+    return;
+  }
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
   // Check 1: Bootstrap invariants
   const result = await checkRuntimeInvariants();
 
@@ -75,6 +88,7 @@ export function startRuntimeMonitor(): void {
 
   console.log('🔍 Starting runtime invariant monitor...');
   console.log(`   Check interval: ${MONITOR_INTERVAL_MS / 1000 / 60} minutes`);
+  console.log('🚨 Runtime invariant monitoring:', process.env.DISABLE_RUNTIME_INVARIANTS === "true" ? "DISABLED" : "ENABLED");
 
   // Run first check immediately
   runInvariantCheck().catch((error) => {
