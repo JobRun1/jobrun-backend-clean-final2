@@ -63,16 +63,35 @@ const ONBOARDING_ONLY_NUMBER = "447476955179";
 
 router.post("/voice", async (req, res) => {
   console.error("🚨🚨🚨 HIT NEW CODE — JOBRUN VOICE — COMMIT 2026-01-03 🚨🚨🚨");
-  console.log("🔥 VOICE HANDLER HIT", {
+  console.log("🔥 VOICE HANDLER HIT (REAL ROUTE, NOT ISOLATION)", {
     url: req.originalUrl,
     method: req.method,
     contentType: req.headers["content-type"],
+    bodyExists: !!req.body,
   });
 
   const from = req.body.From;
   const to = req.body.To;
 
   console.log("📞 Incoming voice call:", { from, to });
+
+  // Log client info if we can resolve it
+  try {
+    const normalizedTo = to?.replace(/\D/g, "") || "";
+    const clientRecord = await prisma.client.findFirst({
+      where: { twilioNumber: normalizedTo.startsWith("0") ? "44" + normalizedTo.substring(1) : normalizedTo },
+      select: { businessName: true, id: true },
+    });
+    if (clientRecord) {
+      console.log("✅ PRODUCTION VOICE CALL:", {
+        client: clientRecord.businessName,
+        clientId: clientRecord.id,
+        number: normalizedTo,
+      });
+    }
+  } catch (err) {
+    // Non-fatal, continue
+  }
 
   try {
     const normalizedTo = normalizePhoneNumber(to);

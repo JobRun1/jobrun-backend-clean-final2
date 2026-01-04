@@ -216,18 +216,6 @@ const SERVER_START_TIME = Date.now();
 export function createServer() {
   const app = express();
 
-  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  // TEMPORARY ISOLATION ROUTE (DEBUGGING ONLY)
-  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  // Tests if Twilio is calling /api/twilio/voice instead of /twilio/voice
-  // REMOVE AFTER PROOF STEP COMPLETE
-  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  app.post("/api/twilio/voice", (req, res) => {
-    console.log("🚨 ISOLATION VOICE ROUTE HIT");
-    res.type("text/xml");
-    res.send('<?xml version="1.0" encoding="UTF-8"?><Response></Response>');
-  });
-
   // TIER 1: Commented out - uses non-existent DB fields
   // CRITICAL: Stripe webhook needs raw body BEFORE json middleware
   // app.use("/api/webhooks", stripeRoutes);
@@ -315,8 +303,8 @@ export function createServer() {
   });
 
   // Routes
-  console.log("🧩 Twilio router mounted at /twilio");
-  app.use("/twilio", twilioRoutes);
+  console.log("🧩 Twilio router mounted at /api/twilio");
+  app.use("/api/twilio", twilioRoutes);
   app.use("/api/admin", adminRoutes); // ⭐ CRITICAL MOUNT
   app.use("/api/impersonate", impersonationRoutes);
   app.use("/api/client/leads", clientLeadsRoutes);
@@ -324,6 +312,65 @@ export function createServer() {
   app.use("/api/client/settings", clientSettingsRoutes);
   app.use("/api/client/dashboard", clientDashboardRoutes);
   app.use("/api/onboard", onboardRoutes);
+
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  // ROUTING VERIFICATION (PRODUCTION SAFETY)
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  // Scans Express routing table to prevent isolation route from shipping
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  const verifyRouting = () => {
+    console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+    console.log("STARTUP CONTRACT: Routing Verification");
+    console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+
+    const routes: { path: string; methods: string[] }[] = [];
+
+    // Scan Express routing stack
+    app._router.stack.forEach((middleware: any) => {
+      if (middleware.route) {
+        routes.push({
+          path: middleware.route.path,
+          methods: Object.keys(middleware.route.methods),
+        });
+      } else if (middleware.name === "router") {
+        middleware.handle.stack.forEach((handler: any) => {
+          if (handler.route) {
+            routes.push({
+              path: middleware.regexp.toString() + handler.route.path,
+              methods: Object.keys(handler.route.methods),
+            });
+          }
+        });
+      }
+    });
+
+    // CRITICAL CHECKS
+    const hasIsolationRoute = routes.some((r) =>
+      r.path.includes("/api/twilio/voice") && r.methods.includes("post")
+    );
+
+    const hasTwilioRouter = app._router.stack.some(
+      (m: any) => m.regexp && m.regexp.toString().includes("/api/twilio")
+    );
+
+    if (hasIsolationRoute) {
+      console.error("🚨🚨🚨 FATAL: Isolation route still exists at /api/twilio/voice");
+      console.error("🚨🚨🚨 This will intercept Twilio webhooks!");
+      process.exit(1);
+    }
+
+    if (!hasTwilioRouter) {
+      console.error("🚨🚨🚨 FATAL: Twilio router not mounted at /api/twilio");
+      process.exit(1);
+    }
+
+    console.log("✅ Routing verification passed");
+    console.log("   - No isolation route detected");
+    console.log("   - Twilio router mounted at /api/twilio");
+    console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
+  };
+
+  verifyRouting();
 
   return app;
 }
