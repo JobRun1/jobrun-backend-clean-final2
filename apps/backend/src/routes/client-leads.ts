@@ -235,7 +235,8 @@ router.post('/:id/messages/send', async (req, res) => {
     }
 
     // Find or create conversation BEFORE creating message
-    const conversation = await findOrCreateConversation(clientId, id);
+    // CRITICAL: Dashboard messages are operational (client → customer communication)
+    const conversation = await findOrCreateConversation(clientId, id, 'OPERATIONAL');
 
     // Create message through conversation service
     const message = await addMessage({

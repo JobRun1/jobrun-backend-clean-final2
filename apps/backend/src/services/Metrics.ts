@@ -16,16 +16,43 @@ interface MetricsSnapshot {
   timings: Record<string, { count: number; totalMs: number; avgMs: number }>;
 }
 
+type Labels = Record<string, string | number>;
+
 class MetricsService {
   private counters: Map<string, number> = new Map();
   private timings: Map<string, number[]> = new Map();
 
   /**
-   * Increment a counter
+   * Increment a counter with optional labels
+   * Labels are appended to metric name for simplicity
    */
-  increment(metric: string, value: number = 1): void {
-    const current = this.counters.get(metric) || 0;
-    this.counters.set(metric, current + value);
+  increment(metric: string, valueOrLabels?: number | Labels, value: number = 1): void {
+    let actualValue = value;
+    let labels: Labels | undefined;
+
+    // Handle overloaded parameters
+    if (typeof valueOrLabels === 'number') {
+      actualValue = valueOrLabels;
+    } else if (valueOrLabels) {
+      labels = valueOrLabels;
+    }
+
+    // Build metric key with labels
+    const metricKey = labels ? this.buildMetricKey(metric, labels) : metric;
+
+    const current = this.counters.get(metricKey) || 0;
+    this.counters.set(metricKey, current + actualValue);
+  }
+
+  /**
+   * Build metric key with labels (Prometheus-style)
+   * Example: conversation.created{mode="OPERATIONAL"}
+   */
+  private buildMetricKey(metric: string, labels: Labels): string {
+    const labelPairs = Object.entries(labels)
+      .map(([key, value]) => `${key}="${value}"`)
+      .join(',');
+    return `${metric}{${labelPairs}}`;
   }
 
   /**
@@ -190,3 +217,28 @@ export const MetricHealthCheckUnhealthy = 'health.check.unhealthy';
  * Timing: Database Operations
  */
 export const MetricDBQuery = 'db.query.duration';
+
+/**
+ * Counter: Conversation Mode Tracking
+ */
+export const MetricConversationCreated = 'conversation.created';
+export const MetricConversationInvariantViolationPipeline = 'conversation.invariant_violation.pipeline';
+export const MetricConversationInvariantViolationHandler = 'conversation.invariant_violation.handler';
+
+/**
+ * Counter: Voice Call Routing Invariant Violations
+ */
+export const MetricVoiceCallOnboardingNumberViolation = 'voice.invariant_violation.onboarding_number';
+export const MetricVoiceCallStatusOnboardingNumberViolation = 'voice.status.invariant_violation.onboarding_number';
+export const MetricVoiceCallOperationalNumberNoClient = 'voice.status.error.operational_no_client';
+export const MetricVoiceCallSystemNumber = 'voice.system_number';
+
+/**
+ * Counter: Twilio Number Pool Invariant Violations
+ */
+export const MetricTwilioNumberPoolOrphanedOperational = 'twilio_number_pool.invariant_violation.orphaned_operational';
+
+/**
+ * Counter: SYSTEM Number Fail-Safe Intake
+ */
+export const MetricVoiceCallSystemFailsafeIntake = 'voice.system_failsafe_intake';

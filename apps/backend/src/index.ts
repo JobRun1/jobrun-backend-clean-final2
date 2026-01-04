@@ -14,6 +14,27 @@ console.log("🔧 ENVIRONMENT LOADED");
 console.log("═══════════════════════════════════════════");
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// 🚨 BUILD INTEGRITY CHECK (DETECT STALE COMPILED CODE)
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+const BUILD_TIMESTAMP = new Date().toISOString();
+const EXPECTED_BUILD_VERSION = "2026-01-04-ONBOARDING-ELIMINATED";
+
+console.log("🔍 BUILD INTEGRITY CHECK");
+console.log(`   Build Version: ${EXPECTED_BUILD_VERSION}`);
+console.log(`   Compiled At: ${BUILD_TIMESTAMP}`);
+
+// This marker MUST exist in compiled output if build is fresh
+// If this marker is missing, production is running stale code
+const BUILD_MARKER = "JOBRUN_BUILD_2026_01_04_CLEAN";
+if (!BUILD_MARKER) {
+  console.error("🚨🚨🚨 FATAL: BUILD_MARKER missing — STALE CODE DETECTED");
+  throw new Error("BUILD INTEGRITY VIOLATION: Marker missing");
+}
+
+console.log("✅ Build integrity verified");
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // EMERGENCY DEPLOYMENT VERIFICATION (REMOVE AFTER CONFIRMATION)
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 console.log("🚨 ALERT GUARD VERSION: PHASE5_EMERGENCY_GUARD_ACTIVE");
@@ -72,7 +93,9 @@ import {
   MetricBootstrapValidationFailure,
   MetricHealthCheckHealthy,
   MetricHealthCheckUnhealthy,
+  MetricTwilioNumberPoolOrphanedOperational,
 } from "./services/Metrics";
+import { getAlertSystemStatus } from "./services/AlertService";
 
 // Validate required ENV values
 function validateEnv() {
@@ -138,12 +161,72 @@ async function validateDefaultClient() {
   metrics.increment(MetricBootstrapValidationSuccess);
 }
 
+// Validate Twilio Number Pool (orphaned OPERATIONAL numbers)
+async function validateTwilioNumberPool() {
+  console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+  console.log("STARTUP CONTRACT: Twilio Number Pool Safety Check");
+  console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+
+  // Query for orphaned OPERATIONAL numbers (OPERATIONAL + no clientId)
+  const orphanedNumbers = await prisma.twilioNumberPool.findMany({
+    where: {
+      role: 'OPERATIONAL',
+      clientId: null
+    },
+    select: {
+      phoneE164: true,
+      role: true,
+      status: true,
+      createdAt: true
+    }
+  });
+
+  if (orphanedNumbers.length > 0) {
+    console.error("🚨 CRITICAL ERROR: Orphaned OPERATIONAL numbers detected");
+    console.error("   OPERATIONAL numbers MUST have a clientId bound");
+    console.error("   Found orphaned numbers:");
+
+    orphanedNumbers.forEach((number) => {
+      console.error(`     - ${number.phoneE164} (status: ${number.status}, created: ${number.createdAt})`);
+    });
+
+    console.error("\n   💡 RESOLUTION:");
+    console.error("      Either:");
+    console.error("      1. Assign these numbers to a client");
+    console.error("      2. Change their role to SYSTEM");
+    console.error("      3. Delete them if they're not in use\n");
+
+    // Increment metric for alerting
+    metrics.increment(MetricTwilioNumberPoolOrphanedOperational, orphanedNumbers.length);
+
+    // DO NOT crash - fail loudly but continue (production safety)
+    console.error("   ⚠️  CONTINUING STARTUP (not crashing)");
+    console.error("   ⚠️  Fix this ASAP to prevent customer impact\n");
+  } else {
+    console.log("✅ No orphaned OPERATIONAL numbers found");
+  }
+
+  console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
+}
+
 // Track server start time for uptime calculation
 const SERVER_START_TIME = Date.now();
 
 // Create Express server
 export function createServer() {
   const app = express();
+
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  // TEMPORARY ISOLATION ROUTE (DEBUGGING ONLY)
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  // Tests if Twilio is calling /api/twilio/voice instead of /twilio/voice
+  // REMOVE AFTER PROOF STEP COMPLETE
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  app.post("/api/twilio/voice", (req, res) => {
+    console.log("🚨 ISOLATION VOICE ROUTE HIT");
+    res.type("text/xml");
+    res.send('<?xml version="1.0" encoding="UTF-8"?><Response></Response>');
+  });
 
   // TIER 1: Commented out - uses non-existent DB fields
   // CRITICAL: Stripe webhook needs raw body BEFORE json middleware
@@ -168,24 +251,32 @@ export function createServer() {
   app.get("/health", async (req, res) => {
     const result = await checkRuntimeInvariants();
     const uptimeSeconds = (Date.now() - SERVER_START_TIME) / 1000;
+    const alertStatus = getAlertSystemStatus();
+
+    // Degrade health status if alerts are disabled
+    const overallStatus = !result.healthy ? "unhealthy" :
+                          !alertStatus.enabled ? "degraded" :
+                          "ok";
 
     if (!result.healthy) {
       metrics.increment(MetricHealthCheckUnhealthy);
       return res.status(503).json({
-        status: "unhealthy",
+        status: overallStatus,
         uptime: uptimeSeconds,
         timestamp: result.timestamp,
         violations: result.violations,
         invariants: result.invariants,
+        alerts: alertStatus,
       });
     }
 
     metrics.increment(MetricHealthCheckHealthy);
     res.status(200).json({
-      status: "ok",
+      status: overallStatus,
       uptime: uptimeSeconds,
       timestamp: result.timestamp,
       invariants: result.invariants,
+      alerts: alertStatus,
     });
   });
 
@@ -224,6 +315,7 @@ export function createServer() {
   });
 
   // Routes
+  console.log("🧩 Twilio router mounted at /twilio");
   app.use("/twilio", twilioRoutes);
   app.use("/api/admin", adminRoutes); // ⭐ CRITICAL MOUNT
   app.use("/api/impersonate", impersonationRoutes);
@@ -243,6 +335,7 @@ export function createServer() {
 async function start() {
   validateEnv();
   await validateDefaultClient();
+  await validateTwilioNumberPool();
 
   // CRITICAL: Validate all SMS pricing templates at startup
   // This will THROW if any template contains £29 or incorrect pricing
@@ -254,6 +347,19 @@ async function start() {
 
   console.log("🚀 JobRun Backend Starting");
   console.log("Port:", PORT);
+
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  // ALERT SYSTEM STATUS CHECK (PRODUCTION SAFETY)
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  const alertStatus = getAlertSystemStatus();
+  if (!alertStatus.enabled) {
+    console.error('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+    console.error('🚨 WARNING: ALERTS ARE GLOBALLY DISABLED');
+    console.error('🚨 ALERTS_DISABLED=true is set in environment');
+    console.error('🚨 Operational failures will NOT notify founder');
+    console.error('🚨 This should NEVER be enabled in production');
+    console.error('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+  }
 
   server.listen(PORT, "0.0.0.0", () => {
     console.log(`✅ Backend listening on 0.0.0.0:${PORT}`);

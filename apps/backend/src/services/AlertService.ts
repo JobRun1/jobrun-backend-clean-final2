@@ -116,6 +116,56 @@ try {
 }
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+//  SCHEMA GUARD (POST-INCIDENT LOCKDOWN)
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// READ-ONLY validation that alert_logs schema matches Prisma client.
+// Prevents schema drift that breaks deduplication.
+// FAIL MODE: Crash on startup (fail-fast).
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+async function validateAlertLogsSchema(): Promise<void> {
+  const requiredColumns = [
+    "alert_type",
+    "alert_key",
+    "severity",
+    "delivered_at",
+    "acknowledged_at",
+    "acknowledged_by",
+    "resolution",
+    "channel",
+  ];
+
+  const rows = await prisma.$queryRaw<
+    { column_name: string }[]
+  >`
+    SELECT column_name
+    FROM information_schema.columns
+    WHERE table_name = 'alert_logs'
+  `;
+
+  const existing = new Set(rows.map(r => r.column_name));
+  const missing = requiredColumns.filter(c => !existing.has(c));
+
+  if (missing.length > 0) {
+    console.error("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+    console.error("🚨 FATAL: alert_logs schema mismatch");
+    console.error("Missing columns:", missing.join(", "));
+    console.error("Alerting cannot operate safely.");
+    console.error("Startup aborted.");
+    console.error("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+    throw new Error("ALERT_LOGS schema validation failed");
+  }
+
+  console.log("✅ [ALERT_GUARD] alert_logs schema verified");
+}
+
+// Execute schema guard at module load time (blocks startup if fails)
+validateAlertLogsSchema().catch((error) => {
+  console.error("[FATAL] AlertService schema guard failed:", error);
+  process.exit(1);
+});
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 //  ALERT SERVICE
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -726,3 +776,23 @@ export const AlertTemplates = {
     },
   }),
 };
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+//  ALERT SYSTEM STATUS (PRODUCTION VISIBILITY)
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+/**
+ * Get alert system status for health checks and monitoring
+ * Exposes whether alerts are globally disabled or degraded
+ */
+export function getAlertSystemStatus() {
+  const isDisabled = process.env.ALERTS_DISABLED === "true";
+  const founderPhone = process.env.FOUNDER_PHONE_NUMBER;
+
+  return {
+    enabled: !isDisabled,
+    reason: isDisabled ? "ALERTS_DISABLED env var set to true" : "normal",
+    founderPhoneConfigured: !!founderPhone,
+    primaryChannel: ALERT_CONFIG.PRIMARY_CHANNEL,
+  };
+}

@@ -1,13 +1,19 @@
 import { prisma } from '../../db';
 import { logger } from '../../utils/logger';
-import type { Conversation, Message, MessageDirection, MessageType } from '@prisma/client';
+import type { Conversation, Message, MessageDirection, MessageType, ConversationMode } from '@prisma/client';
+import { metrics, MetricConversationCreated } from '../../services/Metrics';
 
 /**
  * Find or create a conversation for a customer
+ *
+ * @param mode - OPERATIONAL (customer job flow) or ONBOARDING (NOT USED - onboarding doesn't create conversations)
+ *              - Must be set explicitly at creation time
+ *              - Defaults to ONBOARDING for safety (fail-closed)
  */
 export async function findOrCreateConversation(
   clientId: string,
-  customerId: string
+  customerId: string,
+  mode: ConversationMode = 'ONBOARDING'
 ): Promise<Conversation> {
   try {
     if (!customerId) {
@@ -23,32 +29,43 @@ export async function findOrCreateConversation(
       throw new Error(`Customer ${customerId} does not exist`);
     }
 
-    // Find the most recent conversation for this customer
+    // Find the most recent conversation for this customer WITH MATCHING MODE
+    // CRITICAL: Mode filter prevents returning wrong-mode conversations
     let conversation = await prisma.conversation.findFirst({
       where: {
         clientId,
         customerId,
+        mode, // ← INVARIANT: Only return conversations matching requested mode
       },
       orderBy: { updatedAt: 'desc' },
     });
 
     if (conversation) {
-      logger.debug('Found existing conversation', { conversationId: conversation.id });
+      logger.debug('Found existing conversation', {
+        conversationId: conversation.id,
+        mode: conversation.mode,
+        matchedMode: mode,
+      });
       return conversation;
     }
 
-    // Create new conversation
+    // Create new conversation with explicit mode (set once, never changed)
     conversation = await prisma.conversation.create({
       data: {
         clientId,
         customerId,
+        mode,
       },
     });
 
-    logger.info('Created new conversation', {
+    // Increment metric for monitoring conversation creation by mode
+    metrics.increment(MetricConversationCreated, { mode });
+
+    logger.info('🧭 Created new conversation', {
       conversationId: conversation.id,
       customerId,
       clientId,
+      mode,
     });
 
     return conversation;

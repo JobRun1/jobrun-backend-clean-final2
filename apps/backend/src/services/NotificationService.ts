@@ -105,7 +105,7 @@ export class NotificationService {
   }
 
   /**
-   * Get client notification settings
+   * Get client notification settings (FIX #2)
    */
   private static async getClientNotificationSettings(clientId: string): Promise<{
     smsEnabled: boolean;
@@ -113,15 +113,26 @@ export class NotificationService {
     phoneNumber: string | null;
     email: string | null;
   } | null> {
-    // TODO: Fetch from database
-    // For now, return mock settings
-    // In production, this should query Client table for notification preferences
+    // Fetch actual client phone number for alerts
+    const client = await prisma.client.findUnique({
+      where: { id: clientId },
+      select: { phoneNumber: true },
+    });
+
+    if (!client) {
+      return null;
+    }
+
+    const clientSettings = await prisma.clientSettings.findUnique({
+      where: { clientId },
+      select: { email: true },
+    });
 
     return {
       smsEnabled: true,
       emailEnabled: true,
-      phoneNumber: process.env.ADMIN_PHONE || null,
-      email: process.env.ADMIN_EMAIL || null,
+      phoneNumber: client.phoneNumber,
+      email: clientSettings?.email || null,
     };
   }
 

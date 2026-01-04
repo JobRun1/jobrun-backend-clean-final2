@@ -1,5 +1,4 @@
 import { Router } from "express";
-import twilio from "twilio";
 import { prisma } from "../db";
 import { resolveCustomer } from "../utils/resolveCustomer";
 import { handleInboundSms } from "../ai/pipelines/inboundSmsPipeline";
@@ -13,19 +12,30 @@ import {
   executeResumeCommand,
   getHelpText,
 } from "../services/AdminCommandService";
-import { sendOnboardingSms } from "../utils/onboardingSms";
 import { handleOnboardingSms } from "../services/OnboardingService";
 import { canProcessCustomerMessage, canSendSMS } from "../services/SystemGate";
-import { completeOnboarding } from "../services/OnboardingGuard";
+import {
+  metrics,
+  MetricConversationInvariantViolationPipeline,
+  MetricVoiceCallOnboardingNumberViolation,
+  MetricVoiceCallOperationalNumberNoClient,
+  MetricVoiceCallSystemNumber,
+  MetricVoiceCallSystemFailsafeIntake,
+} from "../services/Metrics";
+import { getCorrelationId, buildLogContext } from "../utils/correlation";
+import {
+  resolveNumberRole,
+  canReceiveVoiceCall,
+  getNumberRoleDescription,
+} from "../utils/numberRoleResolver";
+import { TwilioNumberRole } from "@prisma/client";
+import { sendSMS } from "../twilio/client";
 
 const router = Router();
 
-const accountSid = process.env.TWILIO_ACCOUNT_SID!;
-const authToken = process.env.TWILIO_AUTH_TOKEN!;
 const twilioNumber = process.env.TWILIO_NUMBER!;
 const defaultClientId = process.env.DEFAULT_CLIENT_ID!;
-
-const client = twilio(accountSid, authToken);
+const systemFailsafeSmsNumber = process.env.SYSTEM_FAILSAFE_SMS_NUMBER || twilioNumber;
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 //  PHONE NUMBER NORMALIZATION (handles multiple Twilio formats)
@@ -52,65 +62,76 @@ const ONBOARDING_ONLY_NUMBER = "447476955179";
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 router.post("/voice", async (req, res) => {
+  console.error("🚨🚨🚨 HIT NEW CODE — JOBRUN VOICE — COMMIT 2026-01-03 🚨🚨🚨");
+  console.log("🔥 VOICE HANDLER HIT", {
+    url: req.originalUrl,
+    method: req.method,
+    contentType: req.headers["content-type"],
+  });
+
   const from = req.body.From;
   const to = req.body.To;
 
   console.log("📞 Incoming voice call:", { from, to });
 
   try {
-    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    // TEST CALL DETECTION (ONBOARDING)
-    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    // A call qualifies as a test call ONLY if:
-    // 1. To = client's dedicated Twilio number
-    // 2. From = client's owner phone number (NOT any customer)
-    // 3. Client's onboarding state is S8_FWD_CONFIRM
-    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-    const normalizedFrom = normalizePhoneNumber(from);
     const normalizedTo = normalizePhoneNumber(to);
 
-    // Find client by their dedicated Twilio number
-    const clientRecord = await prisma.client.findFirst({
-      where: { twilioNumber: normalizedTo },
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    // HARD GUARD: Resolve number role and forbid onboarding calls
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    const numberInfo = await resolveNumberRole(normalizedTo || "");
+
+    console.log("📞 Number role resolved for voice call:", {
+      to: normalizedTo,
+      role: numberInfo.role,
+      source: numberInfo.source,
+      clientId: numberInfo.clientId,
+      description: getNumberRoleDescription(numberInfo.role),
     });
 
-    if (clientRecord && clientRecord.phoneNumber) {
-      const normalizedClientPhone = normalizePhoneNumber(clientRecord.phoneNumber);
+    // CRITICAL INVARIANT: Onboarding numbers CANNOT receive voice calls
+    if (!canReceiveVoiceCall(numberInfo)) {
+      const errorMessage = `INVARIANT VIOLATION: Voice call to ONBOARDING number ${normalizedTo}`;
+      console.error("🚨🚨🚨 " + errorMessage);
+      console.error("🚨 ONBOARDING IS SMS-ONLY. Voice calls are FORBIDDEN.");
+      console.error("🚨 Call details:", {
+        from,
+        to: normalizedTo,
+        role: numberInfo.role,
+        timestamp: new Date().toISOString(),
+      });
 
-      // Check if this is the client owner calling their own number (test call)
-      if (normalizedClientPhone && normalizedFrom === normalizedClientPhone) {
-        console.log("🔍 Test call detected (owner phone match):", {
-          from: normalizedFrom,
-          clientPhone: normalizedClientPhone,
-          clientId: clientRecord.id,
-        });
+      // Increment metric for alerting
+      metrics.increment(MetricVoiceCallOnboardingNumberViolation, {
+        role: numberInfo.role,
+        source: numberInfo.source,
+      });
 
-        // Check onboarding state (owned by Client, not Customer)
-        const onboardingState = await prisma.onboardingState.findUnique({
-          where: { clientId: clientRecord.id },
-        });
+      // Return polite TwiML rejection (user-facing message)
+      const rejectionTwiml = `
+    <Response>
+      <Say voice="Polly.Joanna">
+        This number is for text messages only. Please send us a text to get started.
+      </Say>
+      <Hangup/>
+    </Response>
+  `;
 
-        if (onboardingState?.currentState === "S8_FWD_CONFIRM") {
-          // ✅ THIS IS A TEST CALL! Advance state
-          await prisma.onboardingState.update({
-            where: { clientId: clientRecord.id },
-            data: {
-              currentState: "S9_TEST_CALL",
-              testCallDetected: true,
-            },
-          });
-
-          console.log("✅ Onboarding test call detected (voice):", {
-            clientId: clientRecord.id,
-            stateAdvanced: "S8_FWD_CONFIRM → S9_TEST_CALL",
-          });
-        }
-      }
+      res.type("text/xml");
+      return res.send(rejectionTwiml);
     }
+
+    // Log successful guard check
+    console.log("✅ Voice call guard passed:", {
+      role: numberInfo.role,
+      canReceiveVoice: true,
+    });
 
     // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     // RETURN TWIML (SAME FOR ALL CALLS)
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    // NO ONBOARDING LOGIC - Voice callbacks never trigger onboarding
     // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     const twiml = `
     <Response>
@@ -147,6 +168,7 @@ router.post("/voice", async (req, res) => {
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 router.post("/status", async (req, res) => {
+  console.error("🚨🚨🚨 HIT NEW CODE — JOBRUN STATUS — COMMIT 2026-01-03 🚨🚨🚨");
   const callStatus = req.body.CallStatus;
   const from = req.body.From;
   const to = req.body.To;
@@ -159,186 +181,184 @@ router.post("/status", async (req, res) => {
     const normalizedTo = normalizePhoneNumber(to);
 
     // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    // TEST CALL COMPLETION DETECTION (ONBOARDING)
+    // ROLE-BASED ROUTING (FIRST GATE - NO CLIENT LOOKUP BEFORE THIS)
     // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    // A missed test call ONLY completes onboarding if:
-    // 1. From = client's owner phone number
-    // 2. To = client's dedicated Twilio number
-    // 3. State is S9_TEST_CALL
-    // 4. CallStatus is 'no-answer' or 'completed'
-    // 5. CallDuration is 0 (missed call, not answered)
+    // Resolve number role FIRST - no onboarding inference, no fallback logic
     // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    const numberInfo = await resolveNumberRole(normalizedTo || "");
 
-    // Find client by their dedicated Twilio number
-    const clientRecord = await prisma.client.findFirst({
-      where: { twilioNumber: normalizedTo },
+    console.log("📞 Number role resolved for status callback:", {
+      to: normalizedTo,
+      from: normalizedFrom,
+      callStatus,
+      role: numberInfo.role,
+      source: numberInfo.source,
+      clientId: numberInfo.clientId,
+      description: getNumberRoleDescription(numberInfo.role),
     });
 
-    if (clientRecord && clientRecord.phoneNumber) {
-      const normalizedClientPhone = normalizePhoneNumber(clientRecord.phoneNumber);
-
-      // Check if this is the client owner's call
-      if (normalizedClientPhone && normalizedFrom === normalizedClientPhone) {
-        console.log("🔍 Checking for test call completion:", {
-          from: normalizedFrom,
-          clientPhone: normalizedClientPhone,
-          callStatus,
-          duration: callDuration,
-        });
-
-        // Check onboarding state (owned by Client, not Customer)
-        const onboardingState = await prisma.onboardingState.findUnique({
-          where: { clientId: clientRecord.id },
-        });
-
-        // Only complete if state is S9_TEST_CALL and call was missed (duration 0)
-        if (
-          onboardingState?.currentState === "S9_TEST_CALL" &&
-          ["no-answer", "completed"].includes(callStatus) &&
-          parseInt(callDuration) === 0
-        ) {
-          // ✅ TEST CALL PASSED! Mark forwardingEnabled first
-          await prisma.onboardingState.update({
-            where: { clientId: clientRecord.id },
-            data: {
-              forwardingEnabled: true,
-              testCallDetected: true,
-            },
-          });
-
-          // PHASE 3: Use completeOnboarding() to safely mark client complete
-          // This validates ALL requirements before setting onboardingComplete = true
-          const completionResult = await completeOnboarding(clientRecord.id);
-
-          if (!completionResult.success) {
-            console.error("❌ Onboarding completion failed validation:", completionResult.errors);
-            console.error("   Client will remain in onboarding state");
-            return res.sendStatus(200);
-          }
-
-          console.log("🎉 Onboarding test call passed:", {
-            clientId: clientRecord.id,
-            stateAdvanced: "S9_TEST_CALL → COMPLETE",
-            onboardingComplete: true,
-          });
-
-          // Send success SMS
-          const successMessage = `🎉 Perfect! JobRun is now live.
-
-What happens next:
-
-📞 When you miss a call, JobRun answers
-💬 The caller leaves their details
-📲 You get an SMS summary instantly
-
-You're all set. First missed call = first summary.
-
-Welcome aboard 🚀`;
-
-          // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-          // 🚨 FORENSIC LOGGING - Identify alert spam source
-          // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-          console.error("🚨🚨🚨 TWILIO SEND EXECUTED FROM:", __filename);
-          console.error("🚨 STACK TRACE:", new Error().stack);
-          // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-          await client.messages.create({
-            to: normalizedFrom,
-            from: twilioNumber,
-            body: successMessage,
-          });
-
-          console.log("✅ Onboarding success SMS sent to:", normalizedFrom);
-
-          // Early return - we're done!
-          return res.sendStatus(200);
-        } else if (onboardingState?.currentState === "S9_TEST_CALL" && parseInt(callDuration) > 0) {
-          // User ANSWERED the call instead of missing it
-          console.log("⚠️ Test call was answered (should be missed):", {
-            clientId: clientRecord.id,
-            duration: callDuration,
-          });
-
-          const reminderMessage = `Looks like you answered that call!
-
-For the test, call again but DON'T answer.
-
-Let it ring 5+ times so JobRun picks up.`;
-
-          // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-          // 🚨 FORENSIC LOGGING - Identify alert spam source
-          // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-          console.error("🚨🚨🚨 TWILIO SEND EXECUTED FROM:", __filename);
-          console.error("🚨 STACK TRACE:", new Error().stack);
-          // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-          await client.messages.create({
-            to: normalizedFrom,
-            from: twilioNumber,
-            body: reminderMessage,
-          });
-
-          return res.sendStatus(200);
-        }
-      }
-    }
-
     // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    // FALLBACK: REGULAR ONBOARDING SMS (NON-TEST CALLS)
+    // ROUTE 1: OPERATIONAL - Client's dedicated number for customer calls
     // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    // IMPORTANT: Onboarding SMS should be sent from client's dedicated Twilio number
-    // NOT from the global onboarding number
-    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-    // When call is finished or missed/failed
-    if (["completed", "no-answer", "busy", "failed"].includes(callStatus)) {
-      // Validate normalized phone number
+    if (
+      numberInfo.role === TwilioNumberRole.OPERATIONAL &&
+      ["completed", "no-answer", "busy", "failed"].includes(callStatus)
+    ) {
       if (!normalizedFrom) {
-        console.error("❌ [STATUS] Unable to normalize 'from' phone number:", from);
-        return res.sendStatus(200); // Return 200 to Twilio but skip processing
+        console.error("❌ [OPERATIONAL] Unable to normalize 'from' phone number:", from);
+        return res.sendStatus(200);
       }
 
-      // Find or create client by owner phone
-      let clientForOnboarding = await prisma.client.findFirst({
-        where: { phoneNumber: normalizedFrom },
+      // Lookup client by their dedicated Twilio number
+      const clientRecord = await prisma.client.findFirst({
+        where: { twilioNumber: normalizedTo },
       });
 
-      if (!clientForOnboarding) {
-        console.log("📝 [STATUS] Creating new client for owner:", normalizedFrom);
-        console.warn("⚠️ [STATUS] Client created without dedicated Twilio number - needs provisioning");
+      if (!clientRecord) {
+        // ROUTE 1A: OPERATIONAL role but no client found (data consistency error)
+        console.error("🚨 CRITICAL: OPERATIONAL number has no client record:", {
+          to: normalizedTo,
+          from: normalizedFrom,
+          role: numberInfo.role,
+          source: numberInfo.source,
+          callStatus,
+        });
+        console.error("🚨 This indicates a data consistency issue!");
+        console.error("🚨 Number marked OPERATIONAL but not assigned to any client");
 
-        clientForOnboarding = await prisma.client.create({
-          data: {
-            phoneNumber: normalizedFrom,
-            businessName: "Onboarding in progress",
-            region: "UK",
-            twilioNumber: null,
-          },
+        // Increment metric for alerting
+        metrics.increment(MetricVoiceCallOperationalNumberNoClient, {
+          source: numberInfo.source,
+          callStatus,
         });
 
-        console.log("✅ [STATUS] New client created:", {
-          clientId: clientForOnboarding.id,
-          ownerPhone: normalizedFrom,
-        });
+        return res.sendStatus(200);
       }
 
-      // Send onboarding SMS from client's dedicated number (if available)
-      // Fall back to global onboarding number if client doesn't have dedicated number yet
-      const fromNumber = clientForOnboarding.twilioNumber || twilioNumber;
-
-      if (!clientForOnboarding.twilioNumber) {
-        console.warn("⚠️ [STATUS] Client has no dedicated Twilio number, using global onboarding number");
-      }
-
-      await sendOnboardingSms(normalizedFrom, fromNumber);
-
-      console.log("✅ Onboarding SMS sent:", {
-        to: normalizedFrom,
-        from: fromNumber,
-        clientId: clientForOnboarding.id,
-        isDedicatedNumber: !!clientForOnboarding.twilioNumber,
+      console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+      console.log("🔀 ROUTING DECISION: OPERATIONAL (CUSTOMER FLOW)");
+      console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+      console.log("📞 [OPERATIONAL] Missed call for existing client:", {
+        clientId: clientRecord.id,
+        businessName: clientRecord.businessName,
+        twilioNumber: normalizedTo,
+        customerPhone: normalizedFrom,
+        callStatus,
+        smsType: "CUSTOMER_MISSED_CALL",
       });
+
+      // Import and use operational missed-call handler
+      const { routeMissedCall } = await import("../modules/messages/router");
+
+      await routeMissedCall({
+        clientId: clientRecord.id,
+        from: normalizedFrom,
+        to: normalizedTo || "",
+        callSid: req.body.CallSid || "",
+        callStatus,
+      });
+
+      console.log("✅ [OPERATIONAL] Customer missed call SMS sent");
+      console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
+      return res.sendStatus(200);
     }
+
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    // ROUTE 2: SYSTEM - Fail-Safe Customer Intake (Revenue Protection)
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    // CRITICAL INVARIANT: No customer call may result in no response
+    // If a customer calls an unassigned/misconfigured number, we MUST
+    // send them an intake SMS to prevent lost revenue opportunities.
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    if (
+      numberInfo.role === TwilioNumberRole.SYSTEM &&
+      ["completed", "no-answer", "busy", "failed"].includes(callStatus)
+    ) {
+      if (!normalizedFrom) {
+        console.error("❌ [SYSTEM FAILSAFE] Unable to normalize 'from' phone number:", from);
+        return res.sendStatus(200);
+      }
+
+      console.warn("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+      console.warn("⚠️  SYSTEM NUMBER CALL DETECTED - ACTIVATING FAIL-SAFE");
+      console.warn("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+      console.warn("📞 [SYSTEM FAILSAFE] Customer called unassigned number:", {
+        to: normalizedTo,
+        from: normalizedFrom,
+        callStatus,
+        role: numberInfo.role,
+        isKnown: numberInfo.isKnown,
+        action: "SENDING_FAILSAFE_INTAKE_SMS",
+        warning: "This number should be registered in TwilioNumberPool with proper role",
+      });
+
+      try {
+        // FAIL-SAFE: Send generic customer intake SMS
+        // This ensures NO customer call is silently dropped (revenue protection)
+        const failsafeMessage =
+          "We missed your call. Please reply with details about the job you need help with and we'll get back to you shortly.";
+
+        console.log("📤 [SYSTEM FAILSAFE] Sending fail-safe intake SMS:", {
+          to: normalizedFrom,
+          from: systemFailsafeSmsNumber,
+          messagePreview: failsafeMessage.substring(0, 50) + "...",
+        });
+
+        // Send SMS directly - NO database records, NO client association
+        // This is a pure fail-safe catch-all
+        await sendSMS(
+          normalizedFrom,
+          systemFailsafeSmsNumber,
+          failsafeMessage,
+          { correlationId: getCorrelationId(req) }
+        );
+
+        // Increment metric for monitoring/alerting
+        metrics.increment(MetricVoiceCallSystemFailsafeIntake, {
+          isKnown: numberInfo.isKnown.toString(),
+          callStatus,
+        });
+
+        // Also increment existing SYSTEM number metric for tracking
+        metrics.increment(MetricVoiceCallSystemNumber, {
+          isKnown: numberInfo.isKnown.toString(),
+          callStatus,
+        });
+
+        console.log("✅ [SYSTEM FAILSAFE] Fail-safe intake SMS sent successfully");
+        console.warn("⚠️  [SYSTEM FAILSAFE] ACTION REQUIRED:");
+        console.warn("   - Assign this number to a client in TwilioNumberPool");
+        console.warn("   - Or mark it with appropriate role (ONBOARDING/OPERATIONAL/SYSTEM)");
+        console.warn("   - Number: " + normalizedTo);
+        console.warn("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
+
+      } catch (error) {
+        console.error("❌ [SYSTEM FAILSAFE] Failed to send fail-safe SMS:", {
+          to: normalizedFrom,
+          error: error instanceof Error ? error.message : String(error),
+        });
+        console.error("🚨 CRITICAL: Customer call resulted in NO response (revenue loss)");
+
+        // Still increment metric to track failures
+        metrics.increment(MetricVoiceCallSystemNumber, {
+          isKnown: numberInfo.isKnown.toString(),
+          callStatus,
+          failsafe_failed: "true",
+        });
+      }
+
+      return res.sendStatus(200);
+    }
+
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    // FALLTHROUGH: No route matched (should not happen if roles are correct)
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    console.warn("⚠️  No route matched for call status callback:", {
+      role: numberInfo.role,
+      callStatus,
+      to: normalizedTo,
+      from: normalizedFrom,
+    });
 
     res.sendStatus(200);
   } catch (error) {
@@ -352,23 +372,67 @@ Let it ring 5+ times so JobRun picks up.`;
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 router.post("/sms", async (req, res) => {
+  console.error("🚨🚨🚨 HIT NEW CODE — JOBRUN SMS — COMMIT 2026-01-03 🚨🚨🚨");
   const from = req.body.From;
   const to = req.body.To; // CRITICAL: The number being texted
   const body = req.body.Body?.trim() || "";
   const messageSid = req.body.MessageSid;
 
-  console.log("💬 Incoming SMS:", { from, to, body, messageSid });
+  // Extract correlation ID for distributed tracing
+  const correlationId = getCorrelationId(req);
+
+  console.log("💬 Incoming SMS:", { correlationId, from, to, body, messageSid });
 
   // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  // HARD ROUTING GATE (DETERMINISTIC, NO AI)
+  // IDEMPOTENCY CHECK: Prevent duplicate processing of same Twilio message
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  // Twilio retries webhooks if timeout (>15s) or HTTP 500
+  // Customer can press "send" multiple times
+  // MessageSid is unique per Twilio message (our deduplication key)
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  if (messageSid) {
+    const existingMessage = await prisma.message.findUnique({
+      where: { twilioSid: messageSid },
+      select: { id: true, twilioSid: true, createdAt: true },
+    });
+
+    if (existingMessage) {
+      console.log('⚠️ DUPLICATE: Message already processed (Twilio retry or duplicate send)', {
+        correlationId,
+        messageSid,
+        existingMessageId: existingMessage.id,
+        originallyProcessedAt: existingMessage.createdAt,
+      });
+
+      // Return HTTP 200 with empty TwiML (already processed, don't retry)
+      // This is correct behavior - Twilio should not redeliver
+      res.type('text/xml');
+      return res.send('<Response></Response>');
+    }
+  }
+
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  // HARDENED ROUTING STATE MACHINE (EXPLICIT MODE-BASED)
   // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   //
-  // PRIORITY ORDER (STRICT):
-  // 1. Active onboarding state (highest priority)
-  // 2. Onboarding-only number check
-  // 3. Customer job pipeline (fallback only)
+  // PRIORITY ORDER (STRICT, NO FALLTHROUGH):
+  // A) Active onboarding state → handleOnboardingSms()                    [EXIT]
+  // B) Onboarding-only number → handleOnboardingSms()                    [EXIT]
+  // C) Admin command → execute admin command                             [EXIT]
+  // D) Operational conversation (mode=OPERATIONAL) → operational handler [EXIT]
+  // E) Customer job pipeline (creates mode=OPERATIONAL conversations)    [EXIT]
   //
-  // GUARANTEE: If (1) or (2) matches → CUSTOMER_JOB pipeline is unreachable
+  // HARDENING GUARANTEES:
+  // - Conversations have explicit mode field (ONBOARDING | OPERATIONAL)
+  // - Mode is set ONCE at creation time, NEVER inferred from messages
+  // - Operational conversations can NEVER reach onboarding handler
+  // - Onboarding messages can NEVER reach operational handler
+  // - No heuristic detection (replaced with conversation.mode checks)
+  //
+  // INVARIANTS ENFORCED:
+  // - handleOperationalCustomerReply() validates conversation.mode === 'OPERATIONAL'
+  // - All new conversations in customer job pipeline have mode='OPERATIONAL'
+  // - Routing logs show conversation mode for debugging
   // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
   const normalizedTo = normalizePhoneNumber(to);
@@ -377,6 +441,34 @@ router.post("/sms", async (req, res) => {
   if (!normalizedFrom) {
     console.error("❌ CRITICAL: Unable to normalize 'from' phone number:", from);
     return res.status(400).send("Invalid phone number");
+  }
+
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  // ROLE-BASED ONBOARDING GUARD (HARD FIREWALL - FIRST GATE)
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  // CRITICAL INVARIANT: Onboarding logic can ONLY run if number role is ONBOARDING
+  // OPERATIONAL and SYSTEM numbers are onboarding-dead zones, permanently.
+  // This guard MUST execute before ANY onboarding state checks or logic paths.
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  const numberInfo = await resolveNumberRole(normalizedTo || "");
+
+  console.log("📱 SMS number role resolved:", {
+    to: normalizedTo,
+    from: normalizedFrom,
+    role: numberInfo.role,
+    source: numberInfo.source,
+    clientId: numberInfo.clientId,
+    description: getNumberRoleDescription(numberInfo.role),
+  });
+
+  const isOnboardingAllowed = numberInfo.role === TwilioNumberRole.ONBOARDING;
+
+  if (!isOnboardingAllowed) {
+    console.log("🚫 ONBOARDING BLOCKED: Number role is not ONBOARDING", {
+      to: normalizedTo,
+      role: numberInfo.role,
+      onboardingPathsDisabled: true,
+    });
   }
 
   // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -396,35 +488,123 @@ router.post("/sms", async (req, res) => {
   // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
   // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  // A) ACTIVE ONBOARDING STATE CHECK (HIGHEST PRIORITY)
+  // A) ACTIVE ONBOARDING STATE CHECK (GUARDED BY ROLE)
   // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  // Find client by owner phone (NOT by defaultClientId)
+  // CRITICAL: This path is ONLY reachable if numberInfo.role === ONBOARDING
   // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  let clientByPhone = await prisma.client.findFirst({
-    where: { phoneNumber: normalizedFrom },
-    include: {
-      billing: true,
-    },
-  });
-
-  // Check if this client has active onboarding
-  if (clientByPhone) {
-    const onboardingState = await prisma.onboardingState.findUnique({
-      where: { clientId: clientByPhone.id },
+  if (isOnboardingAllowed) {
+    let clientByPhone = await prisma.client.findFirst({
+      where: { phoneNumber: normalizedFrom },
+      include: {
+        billing: true,
+      },
     });
 
-    if (onboardingState && onboardingState.currentState !== "COMPLETE") {
-      console.log("ROUTING_DECISION", {
-        mode: "ONBOARDING_ONLY",
-        reason: "ACTIVE_ONBOARDING_STATE",
-        ownerPhone: normalizedFrom,
-        clientId: clientByPhone.id,
-        clientTwilioNumber: clientByPhone.twilioNumber,
-        state: onboardingState.currentState,
-        to: normalizedTo,
+    // Check if this client has active onboarding
+    if (clientByPhone) {
+      const onboardingState = await prisma.onboardingState.findUnique({
+        where: { clientId: clientByPhone.id },
       });
 
+      if (onboardingState && onboardingState.currentState !== "COMPLETE") {
+        console.log("ROUTING_DECISION", {
+          mode: "ONBOARDING_ONLY",
+          reason: "ACTIVE_ONBOARDING_STATE",
+          ownerPhone: normalizedFrom,
+          clientId: clientByPhone.id,
+          clientTwilioNumber: clientByPhone.twilioNumber,
+          state: onboardingState.currentState,
+          to: normalizedTo,
+          numberRole: numberInfo.role,
+        });
+
+        try {
+          const { reply } = await handleOnboardingSms({
+            client: clientByPhone,
+            fromPhone: from,
+            userInput: body,
+            messageSid,
+          });
+
+          if (reply && reply.trim().length > 0) {
+            const twiml = `
+    <Response>
+      <Message>${reply}</Message>
+    </Response>
+  `;
+            console.log("📤 [ONBOARDING_STATE] Sending TwiML response");
+            res.type("text/xml");
+            return res.send(twiml);
+          } else {
+            console.log("✅ [ONBOARDING_STATE] No reply needed");
+            res.sendStatus(200);
+            return;
+          }
+        } catch (error) {
+          console.error("❌ [ONBOARDING_STATE] Error:", error);
+          const errorTwiml = `
+    <Response>
+      <Message>System error. Please try again.</Message>
+    </Response>
+  `;
+          res.type("text/xml");
+          return res.send(errorTwiml);
+        }
+      }
+    }
+
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    // B) ONBOARDING-ONLY NUMBER CHECK (GUARDED BY ROLE)
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    // CRITICAL: This path is ONLY reachable if numberInfo.role === ONBOARDING
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    if (normalizedTo === ONBOARDING_ONLY_NUMBER) {
       try {
+        // Find or create client by owner phone
+        if (!clientByPhone) {
+          console.log("📝 [ONBOARDING] Creating new client for owner:", normalizedFrom);
+
+          // TODO: Provision a dedicated Twilio number for this client
+          // For now, we'll create the client without twilioNumber and flag it
+          console.warn("⚠️ [ONBOARDING] Client created without dedicated Twilio number - needs provisioning");
+
+          const newClient = await prisma.client.create({
+            data: {
+              phoneNumber: normalizedFrom,
+              businessName: "Onboarding in progress",
+              region: "UK",
+              twilioNumber: null,
+            },
+          });
+
+          console.log("✅ [ONBOARDING] New client created:", {
+            clientId: newClient.id,
+            ownerPhone: normalizedFrom,
+          });
+
+          // Refetch with billing relation
+          clientByPhone = await prisma.client.findUnique({
+            where: { id: newClient.id },
+            include: {
+              billing: true,
+            },
+          });
+
+          if (!clientByPhone) {
+            throw new Error("Failed to refetch newly created client");
+          }
+        }
+
+        console.log("ROUTING_DECISION", {
+          mode: "ONBOARDING_ONLY",
+          reason: "ONBOARDING_NUMBER",
+          ownerPhone: normalizedFrom,
+          clientId: clientByPhone.id,
+          clientTwilioNumber: clientByPhone.twilioNumber,
+          to: normalizedTo,
+          numberRole: numberInfo.role,
+        });
+
         const { reply } = await handleOnboardingSms({
           client: clientByPhone,
           fromPhone: from,
@@ -438,16 +618,16 @@ router.post("/sms", async (req, res) => {
       <Message>${reply}</Message>
     </Response>
   `;
-          console.log("📤 [ONBOARDING_STATE] Sending TwiML response");
+          console.log("📤 [ONBOARDING_NUMBER] Sending TwiML response");
           res.type("text/xml");
           return res.send(twiml);
         } else {
-          console.log("✅ [ONBOARDING_STATE] No reply needed");
+          console.log("✅ [ONBOARDING_NUMBER] No reply needed");
           res.sendStatus(200);
           return;
         }
       } catch (error) {
-        console.error("❌ [ONBOARDING_STATE] Error:", error);
+        console.error("❌ [ONBOARDING_NUMBER] Error:", error);
         const errorTwiml = `
     <Response>
       <Message>System error. Please try again.</Message>
@@ -456,90 +636,6 @@ router.post("/sms", async (req, res) => {
         res.type("text/xml");
         return res.send(errorTwiml);
       }
-    }
-  }
-
-  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  // B) ONBOARDING-ONLY NUMBER CHECK
-  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  // If SMS is to the global onboarding number, create/find client by owner phone
-  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  if (normalizedTo === ONBOARDING_ONLY_NUMBER) {
-    try {
-      // Find or create client by owner phone
-      if (!clientByPhone) {
-        console.log("📝 [ONBOARDING] Creating new client for owner:", normalizedFrom);
-
-        // TODO: Provision a dedicated Twilio number for this client
-        // For now, we'll create the client without twilioNumber and flag it
-        console.warn("⚠️ [ONBOARDING] Client created without dedicated Twilio number - needs provisioning");
-
-        const newClient = await prisma.client.create({
-          data: {
-            phoneNumber: normalizedFrom,
-            businessName: "Onboarding in progress",
-            region: "UK",
-            twilioNumber: null,
-          },
-        });
-
-        console.log("✅ [ONBOARDING] New client created:", {
-          clientId: newClient.id,
-          ownerPhone: normalizedFrom,
-        });
-
-        // Refetch with billing relation
-        clientByPhone = await prisma.client.findUnique({
-          where: { id: newClient.id },
-          include: {
-            billing: true,
-          },
-        });
-
-        if (!clientByPhone) {
-          throw new Error("Failed to refetch newly created client");
-        }
-      }
-
-      console.log("ROUTING_DECISION", {
-        mode: "ONBOARDING_ONLY",
-        reason: "ONBOARDING_NUMBER",
-        ownerPhone: normalizedFrom,
-        clientId: clientByPhone.id,
-        clientTwilioNumber: clientByPhone.twilioNumber,
-        to: normalizedTo,
-      });
-
-      const { reply } = await handleOnboardingSms({
-        client: clientByPhone,
-        fromPhone: from,
-        userInput: body,
-        messageSid,
-      });
-
-      if (reply && reply.trim().length > 0) {
-        const twiml = `
-    <Response>
-      <Message>${reply}</Message>
-    </Response>
-  `;
-        console.log("📤 [ONBOARDING_NUMBER] Sending TwiML response");
-        res.type("text/xml");
-        return res.send(twiml);
-      } else {
-        console.log("✅ [ONBOARDING_NUMBER] No reply needed");
-        res.sendStatus(200);
-        return;
-      }
-    } catch (error) {
-      console.error("❌ [ONBOARDING_NUMBER] Error:", error);
-      const errorTwiml = `
-    <Response>
-      <Message>System error. Please try again.</Message>
-    </Response>
-  `;
-      res.type("text/xml");
-      return res.send(errorTwiml);
     }
   }
 
@@ -613,7 +709,89 @@ router.post("/sms", async (req, res) => {
   }
 
   // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  // C) CUSTOMER JOB PIPELINE (FALLBACK ONLY)
+  // D) OPERATIONAL CUSTOMER REPLY HANDLER — HARD FORK
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  // Customers replying to missed call job-intake SMS go here.
+  // This intercepts BEFORE the AI pipeline.
+  // GUARANTEED: Onboarding messages cannot reach this path.
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  try {
+    // Find customer record to check for existing conversation
+    const customerRecord = await prisma.customer.findFirst({
+      where: {
+        phone: normalizedFrom,
+      },
+      include: {
+        conversations: {
+          orderBy: { updatedAt: 'desc' },
+          take: 1,
+          include: {
+            messages: {
+              orderBy: { createdAt: 'asc' },
+              take: 10, // Get recent messages to check conversation type
+            },
+          },
+        },
+      },
+    });
+
+    if (customerRecord && customerRecord.conversations.length > 0) {
+      const mostRecentConversation = customerRecord.conversations[0];
+
+      // Import operational handler
+      const { handleOperationalCustomerReply } = await import(
+        '../modules/messages/operationalCustomerHandler'
+      );
+
+      // Check if this is an operational conversation (explicit mode check - NO INFERENCE)
+      const isOperational = mostRecentConversation.mode === 'OPERATIONAL';
+
+      console.log('🧭 Conversation mode resolved:', {
+        conversationId: mostRecentConversation.id,
+        mode: mostRecentConversation.mode,
+        isOperational,
+        routing: isOperational ? 'operational handler' : 'customer job pipeline',
+      });
+
+      if (isOperational) {
+        console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+        console.log('🔀 ROUTING DECISION: OPERATIONAL CUSTOMER REPLY');
+        console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+        console.log('📞 [OPERATIONAL] Customer replying to job-intake SMS:', {
+          conversationId: mostRecentConversation.id,
+          customerId: customerRecord.id,
+          customerPhone: normalizedFrom,
+          willUseAI: false,
+          willTriggerOnboarding: false,
+        });
+
+        // Handle operational reply (parse job, notify client, confirm customer)
+        await handleOperationalCustomerReply({
+          conversationId: mostRecentConversation.id,
+          clientId: mostRecentConversation.clientId,
+          customerId: customerRecord.id,
+          customerPhone: normalizedFrom,
+          messageBody: body,
+          twilioSid: messageSid,
+          correlationId, // Pass correlation ID for tracing
+        });
+
+        console.log('✅ [OPERATIONAL] Customer reply handled (NOT sent to AI pipeline)');
+        console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
+
+        // Return empty TwiML (response already sent by handler)
+        res.type('text/xml');
+        return res.send('<Response></Response>');
+      }
+    }
+  } catch (error) {
+    console.error('❌ [OPERATIONAL] Error checking operational status:', error);
+    // Fall through to customer job pipeline on error
+  }
+
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  // E) CUSTOMER JOB PIPELINE (FALLBACK ONLY)
   // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
   console.log("ROUTING_DECISION", {
@@ -684,34 +862,120 @@ router.post("/sms", async (req, res) => {
       return res.status(500).send("Customer resolution failed");
     }
 
-    // Find or create conversation BEFORE creating message
+    // Find or create conversation BEFORE creating message (OPERATIONAL mode - customer job flow)
     const conversation = await findOrCreateConversation(
       clientRecord.id,
-      customer.id
+      customer.id,
+      'OPERATIONAL'
     );
 
-    // CRITICAL: Create message through conversation service with validation
-    // This will throw if conversation doesn't belong to customer (prevents FK violation)
-    const inboundMessage = await addMessage({
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    // INVARIANT: This pipeline should only process OPERATIONAL conversations
+    // (Existing OPERATIONAL conversations should have been routed earlier)
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    console.log('🧭 Conversation mode in customer job pipeline:', {
       conversationId: conversation.id,
-      clientId: clientRecord.id,
-      customerId: customer.id,
-      direction: "INBOUND",
-      type: "SMS",
-      body,
-      twilioSid: messageSid,
+      mode: conversation.mode,
+      expected: 'OPERATIONAL',
     });
 
-    console.log("✅ Inbound message persisted:", inboundMessage.id);
+    // HARD INVARIANT: Prevent non-operational conversations from being processed
+    if (conversation.mode !== 'OPERATIONAL') {
+      // Increment metric for alerting
+      metrics.increment(MetricConversationInvariantViolationPipeline, {
+        actualMode: conversation.mode,
+        expectedMode: 'OPERATIONAL',
+      });
 
-    const { replyMessage } = await handleInboundSms({
-      client: clientRecord,
-      customer,
-      inboundMessage,
-      clientSettings,
-    });
+      // Structured log with correlation ID
+      console.error('❌ INVARIANT VIOLATION: Non-operational conversation reached customer job pipeline',
+        buildLogContext(correlationId, {
+          invariantName: 'pipeline.mode_check',
+          conversationId: conversation.id,
+          actualMode: conversation.mode,
+          expectedMode: 'OPERATIONAL',
+          customerId: customer.id,
+          customerPhone: from,
+          clientId: clientRecord.id,
+        })
+      );
 
-    console.log("🔍 TWILIO WEBHOOK: replyMessage from pipeline:", replyMessage);
+      // CHANGED: Send polite error to customer instead of silent drop
+      // Customer needs to know something went wrong (not ghosted)
+      const errorTwiml = `<Response>
+  <Message>We're experiencing a technical issue. Please call us directly or try again in a few minutes. Sorry for the inconvenience!</Message>
+</Response>`;
+
+      res.type('text/xml');
+      return res.send(errorTwiml);
+    }
+
+    console.log('✅ Invariant check passed: conversation is OPERATIONAL');
+
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    // CRITICAL: Atomic message processing (prevents message limbo)
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    // Transaction ensures:
+    // - If AI pipeline fails, message NOT persisted (no orphaned messages)
+    // - Twilio will retry on HTTP 500, whole flow runs again
+    // - Idempotency check prevents duplicates on successful retry
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    let inboundMessage;
+    let replyMessage;
+
+    try {
+      // Wrap message creation + AI processing in transaction
+      // NOTE: Long transaction (AI calls inside) but necessary for atomicity
+      const result = await prisma.$transaction(async (tx) => {
+        // 1. Create message inside transaction
+        const msg = await tx.message.create({
+          data: {
+            conversationId: conversation.id,
+            clientId: clientRecord.id,
+            customerId: customer.id,
+            direction: "INBOUND",
+            type: "SMS",
+            body,
+            twilioSid: messageSid,
+          },
+        });
+
+        console.log("✅ Inbound message persisted (transaction):", msg.id);
+
+        // 2. Process with AI pipeline (must succeed for commit)
+        // CRITICAL: If this throws, transaction rolls back
+        const { replyMessage: reply } = await handleInboundSms({
+          client: clientRecord,
+          customer,
+          inboundMessage: msg,
+          clientSettings,
+        });
+
+        return { inboundMessage: msg, replyMessage: reply };
+      }, {
+        maxWait: 5000,  // Wait max 5s for lock acquisition
+        timeout: 30000, // Total timeout 30s (enough for AI pipeline)
+      });
+
+      inboundMessage = result.inboundMessage;
+      replyMessage = result.replyMessage;
+
+      console.log("🔍 TWILIO WEBHOOK: replyMessage from pipeline:", replyMessage);
+
+    } catch (error) {
+      console.error("❌ CRITICAL: Message processing transaction failed", {
+        correlationId,
+        error: error instanceof Error ? error.message : String(error),
+        customerId: customer.id,
+        customerPhone: from,
+        stack: error instanceof Error ? error.stack : undefined,
+      });
+
+      // IMPORTANT: Return HTTP 500 to trigger Twilio retry
+      // Message NOT persisted, Twilio will redeliver
+      res.status(500).send("Message processing failed - will retry");
+      return;
+    }
 
     // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     // SYSTEMGATE: Can Send SMS? (OUTBOUND KILL SWITCH)
@@ -724,9 +988,18 @@ router.post("/sms", async (req, res) => {
       console.warn(`[SystemGate] SMS_BLOCKED: ${smsGuard.reason}`);
       console.log(`[SystemGate] Would have sent: "${replyMessage}"`);
 
-      const emptyTwiml = `<Response></Response>`;
+      // CHANGED: Send polite deflection instead of silence
+      // Customer needs feedback even when system is paused
+      const phoneInfo = clientRecord.phoneNumber
+        ? ` at ${clientRecord.phoneNumber}`
+        : ' using our main number';
+
+      const deflectionTwiml = `<Response>
+  <Message>Thanks for your message! We're temporarily unable to respond via text. Please call us directly${phoneInfo} for faster service.</Message>
+</Response>`;
+
       res.type("text/xml");
-      return res.send(emptyTwiml);
+      return res.send(deflectionTwiml);
     }
 
     // Only return TwiML after successful DB persistence

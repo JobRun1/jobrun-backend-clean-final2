@@ -64,7 +64,6 @@ async function bootstrapDefaultClient(): Promise<BootstrapResult> {
         businessName: "Default Demo Client",
         region: "US",
         timezone: "America/New_York",
-        paymentActive: false,
         demoToolsVisible: true,
         demoClient: true,
       },

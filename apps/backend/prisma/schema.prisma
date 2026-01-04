@@ -94,20 +94,24 @@ model Customer {
 // CONVERSATION
 // ──────────────────────────────────────────────
 model Conversation {
-  id         String    @id @default(cuid())
-  createdAt  DateTime  @default(now())
-  updatedAt  DateTime  @updatedAt
+  id         String           @id @default(cuid())
+  createdAt  DateTime         @default(now())
+  updatedAt  DateTime         @updatedAt
 
   clientId   String
   customerId String?
 
-  client     Client    @relation(fields: [clientId], references: [id], onDelete: Cascade)
-  customer   Customer? @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  // Explicit conversation mode (set once at creation, never inferred)
+  mode       ConversationMode @default(ONBOARDING)
+
+  client     Client           @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  customer   Customer?        @relation(fields: [customerId], references: [id], onDelete: Cascade)
 
   messages   Message[]
 
   @@index([clientId])
   @@index([customerId])
+  @@index([mode])
   @@map("conversations")
 }
 
@@ -479,6 +483,12 @@ enum OnboardingStateEnum {
   COMPLETE
 }
 
+// CONVERSATION Mode (Explicit Type)
+enum ConversationMode {
+  ONBOARDING   // Business owner setup flow (NOT USED - onboarding doesn't create conversations)
+  OPERATIONAL  // Customer job-intake flow (missed call recovery)
+}
+
 //
 // ──────────────────────────────────────────────
 // ALERT LOG (Ops Alerting)
@@ -511,16 +521,18 @@ model AlertLog {
 // TWILIO NUMBER POOL
 // ──────────────────────────────────────────────
 model TwilioNumberPool {
-  id         String    @id @default(cuid())
-  createdAt  DateTime  @default(now()) @map("created_at")
-  updatedAt  DateTime  @updatedAt @map("updated_at")
-  phoneE164  String    @unique @map("phone_e164")
-  status     String    @default("AVAILABLE")
-  clientId   String?   @map("client_id")
-  assignedAt DateTime? @map("assigned_at")
+  id         String           @id @default(cuid())
+  createdAt  DateTime         @default(now()) @map("created_at")
+  updatedAt  DateTime         @updatedAt @map("updated_at")
+  phoneE164  String           @unique @map("phone_e164")
+  status     String           @default("AVAILABLE")
+  role       TwilioNumberRole @default(SYSTEM) @map("role")
+  clientId   String?          @map("client_id")
+  assignedAt DateTime?        @map("assigned_at")
 
   @@index([status])
   @@index([clientId])
+  @@index([role])
   @@map("twilio_number_pool")
 }
 
@@ -646,6 +658,13 @@ enum PaymentSource {
   STRIPE              // Stripe subscription
   MANUAL              // Manual invoicing (enterprise)
   WAIVED              // Free tier (partnerships)
+}
+
+// Twilio number role (routing behavior)
+enum TwilioNumberRole {
+  OPERATIONAL  // Client's dedicated number for customer job intake
+  ONBOARDING   // System number for new business owner onboarding (SMS-only)
+  SYSTEM       // Internal/test/forwarded numbers (treat as operational with warnings)
 }
 
 //
